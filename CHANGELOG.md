@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-04-17
+
+### Added
+
+- `--init-bare <url>` — clone remote as bare repo + master worktree in one command
+- `--add-target <name>` — create empty orphan worktree + add to config
+- `--migrate` — convert existing .git repo to bare + worktree structure
+- `last_run` state tracking — records every invocation (mode, checks, summary)
+- Dry-run safety gate — `--apply` blocked without prior successful dry-run
+- File logging to `logs/<topology>-<target>-<datetime>.log`
+- `--log-dir` to override log directory, `--no-log` to disable
+- `--help-config` — print config schema reference with field docs
+- Workflow-based CLI help (phases 0-5 + CI)
+
+### Changed
+
+- README rewritten: AI-agent-first documentation, workflow-centric
+- CLI epilog restructured as numbered workflow phases
+
 ## [0.1.0] - 2026-04-17
 
 ### Added
