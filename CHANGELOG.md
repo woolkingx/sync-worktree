@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-04-18
+
+### Added
+
+- `--remove-target <name>` — remove worktree + branch + config entry + state cleanup
+- `config_remove_target` API for programmatic target removal
+- No-argument invocation shows help (terminal only)
+
+### Changed
+
+- **API blocks refactor** — codebase reorganized into 6 API blocks with consistent naming:
+  - `git_*` — worktree/topology operations
+  - `config_*` — CRUD + state manager (sole config/state file accessor)
+  - `filter_*` — include/exclude pipeline
+  - `sync_*` — diff, check, apply
+  - `state_*` — persistence
+  - `report_*` — output formatting
+- Config block is now the unified state manager — all config/state mutations go through `config_*` and `state_*` APIs
+- `resolve_target` split into `config_get_target` (pure merge) + `config_resolve_paths` (git query)
+- Backward compatibility aliases retained for all renamed functions
+
 ## [0.2.0] - 2026-04-17
 
 ### Added
