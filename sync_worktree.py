@@ -1,67 +1,79 @@
 #!/usr/bin/env python3
 """
-sync_worktree.py — Config-driven worktree sync.
-
-One config file in .git/ internal dir. Pipeline filter: include → exclude.
-Three topologies: bare repo, normal repo + worktrees, plain repo.
-Dry-run by default. --apply to execute.
-
-Config location (auto-detected):
-  bare:      .bare/sync-worktree.json
-  worktree:  <git-common-dir>/sync-worktree.json
-  repo:      .git/sync-worktree.json
+sync_worktree.py - Worktree sync.
 
 Usage:
-    python3 sync_worktree.py                     # dry-run all targets
-    python3 sync_worktree.py runner              # dry-run specific target
-    python3 sync_worktree.py --apply             # execute all targets
-    python3 sync_worktree.py runner --apply      # execute specific target
-    python3 sync_worktree.py --init              # create default config
-    python3 sync_worktree.py --config            # print resolved config
-    python3 sync_worktree.py --status            # print last sync state
-    python3 sync_worktree.py --strict            # abort on any warning (CI)
-    python3 sync_worktree.py --json              # JSON output
+    sync-worktree help-config
+    sync-worktree init-bare <url>
+    sync-worktree migrate
+    sync-worktree init
+    sync-worktree config
+    sync-worktree status
+    sync-worktree add-target <name>
+    sync-worktree remove-target <name>
+    sync-worktree sync [target...] [--apply] [--strict] [--force] [--diff] [-v] [-q]
+
+Run either as the console script `sync-worktree` or directly with
+`python3 sync_worktree.py`.
 """
 
 import argparse
+import atexit
+import copy
+from contextlib import contextmanager
 import filecmp
-import fnmatch
 import hashlib
 import json
 import logging
+import tempfile
 import shutil
+import shlex
 import subprocess
 import sys
 import time
 from datetime import datetime
+from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
 
-__version__ = "0.3.0"
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - non-POSIX fallback
+    fcntl = None
+
+__version__ = "0.4.5"
+
+
+class HelpOnErrorParser(argparse.ArgumentParser):
+    def error(self, message):
+        self.print_help(sys.stderr)
+        self.exit(2, f"{self.prog}: error: {message}\n")
 
 
 # == Git Block ================================================================
 
-def git_run(*args, cwd=None):
+def git_run(*args, cwd=None, timeout=30) -> str:
     """Run git command, return stdout. Raises on failure."""
     result = subprocess.run(
         ["git"] + list(args),
-        cwd=cwd, capture_output=True, text=True,
+        cwd=cwd, capture_output=True, text=True, timeout=timeout,
     )
     if result.returncode != 0:
         raise RuntimeError(f"git {' '.join(args)} failed: {result.stderr.strip()}")
     return result.stdout.strip()
 
 
-def git_try(*args, cwd=None):
+def git_try(*args, cwd=None, timeout=30) -> Tuple[bool, str]:
     """Run git command, return (success, stdout)."""
     result = subprocess.run(
         ["git"] + list(args),
-        cwd=cwd, capture_output=True, text=True,
+        cwd=cwd, capture_output=True, text=True, timeout=timeout,
     )
     return result.returncode == 0, result.stdout.strip()
 
 
-def git_detect_topology():
+def git_detect_topology() -> Tuple[str, Path, Path]:
     """Detect git topology and return (topology, git_internal_dir, cwd_worktree_path).
 
     topology: 'bare' | 'worktree' | 'repo'
@@ -95,13 +107,14 @@ def git_detect_topology():
     return "repo", git_common, Path.cwd().resolve()
 
 
-def git_parse_worktrees(git_common):
+def git_parse_worktrees(git_common) -> List[Dict[str, Any]]:
     """Parse `git worktree list --porcelain` into structured data."""
     result = subprocess.run(
         ["git", "worktree", "list", "--porcelain"],
         cwd=git_common, capture_output=True, text=True,
     )
     if result.returncode != 0:
+        logging.debug("git worktree list failed: %s", result.stderr.strip())
         return []
 
     worktrees = []
@@ -116,13 +129,14 @@ def git_parse_worktrees(git_common):
         elif line == "bare":
             current["bare"] = True
         elif line.startswith("branch "):
-            current["branch"] = line.split(" ", 1)[1].split("/")[-1]
+            ref = line.split(" ", 1)[1]
+            current["branch"] = ref.removeprefix("refs/heads/") if ref.startswith("refs/heads/") else ref
     if current and not current.get("bare"):
         worktrees.append(current)
     return worktrees
 
 
-def git_resolve_worktree(name, git_common):
+def git_resolve_worktree(name, git_common) -> Optional[Path]:
     """Resolve worktree name to its filesystem path."""
     worktrees = git_parse_worktrees(git_common)
     for wt in worktrees:
@@ -131,7 +145,7 @@ def git_resolve_worktree(name, git_common):
     return None
 
 
-def git_tracked_files(worktree_path):
+def git_tracked_files(worktree_path) -> List[Path]:
     """Get git-tracked files from a worktree."""
     try:
         result = git_run("ls-files", cwd=worktree_path)
@@ -142,8 +156,11 @@ def git_tracked_files(worktree_path):
     return sorted(Path(line) for line in result.split("\n") if line)
 
 
-def git_create_worktree(project_root, name):
+def git_create_worktree(project_root, name) -> Path:
     """Create empty detached worktree."""
+    name_error = _validate_target_name(name)
+    if name_error:
+        raise RuntimeError(name_error)
     logging.info(f"Creating worktree: {name}")
     wt_path = project_root / name
     git_run("worktree", "add", "--detach", str(wt_path))
@@ -151,7 +168,7 @@ def git_create_worktree(project_root, name):
     return wt_path
 
 
-def git_setup_orphan(name, wt_path):
+def git_setup_orphan(name, wt_path) -> None:
     """Create orphan branch in worktree with empty initial commit."""
     git_run("checkout", "--orphan", name, cwd=wt_path)
     git_run("rm", "-rf", ".", cwd=wt_path)
@@ -165,21 +182,10 @@ def git_setup_orphan(name, wt_path):
     logging.debug(f"Created orphan branch '{name}'")
 
 
-def git_write_pointer(cwd):
+def git_write_pointer(cwd) -> None:
     """Write .git pointer file for bare repo."""
     (cwd / ".git").write_text("gitdir: ./.bare\n")
     logging.info("Created .git pointer")
-
-
-# Backward compat (tests)
-_git = git_run
-_git_ok = git_try
-detect_topology = git_detect_topology
-parse_worktrees = git_parse_worktrees
-resolve_worktree_path = git_resolve_worktree
-get_tracked_files = git_tracked_files
-_setup_orphan_branch = git_setup_orphan
-_write_git_pointer = git_write_pointer
 
 
 # == Config Block =============================================================
@@ -200,31 +206,90 @@ DEFAULT_CONFIG = {
     "targets": {},
 }
 
-DEFAULT_EXCLUDE = [
-    "tests/",
-    "test/",
-    "plan/",
-    ".backup/",
-    ".cleanup/",
-    "*.log",
-    "__pycache__/",
-    ".claude/",
-]
+DEFAULT_EXCLUDE = [".gitignore"]
 
 DEFAULT_TARGET = {
     "delete_policy": "never",
 }
 
 
-def config_path(git_internal):
+def new_config() -> dict:
+    """Return a fresh config scaffold."""
+    return copy.deepcopy(DEFAULT_CONFIG)
+
+
+def config_path(git_internal) -> Path:
     return git_internal / CONFIG_NAME
 
 
-def state_path(git_internal):
+def state_path(git_internal) -> Path:
     return git_internal / STATE_NAME
 
 
-def config_read(git_internal):
+def _state_write(git_internal, state) -> None:
+    path = state_path(git_internal)
+    temp = path.with_suffix(path.suffix + ".tmp")
+    temp.write_text(json.dumps(state, indent=2) + "\n")
+    temp.replace(path)
+
+
+@contextmanager
+def _state_lock(git_internal):
+    lock_path = state_path(git_internal).with_suffix(".lock")
+    lock_path.touch(exist_ok=True)
+    with lock_path.open("r+") as lock_file:
+        if fcntl is not None:
+            fcntl.flock(lock_file, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            if fcntl is not None:
+                fcntl.flock(lock_file, fcntl.LOCK_UN)
+
+
+def _get_scope_label(topology, git_internal, cwd_worktree) -> str:
+    if topology == "bare":
+        return git_internal.parent.name if git_internal else "bare"
+    if topology == "worktree":
+        return cwd_worktree.parent.name if cwd_worktree else "worktree"
+    return cwd_worktree.name if cwd_worktree else "repo"
+
+
+def config_write(git_internal, config) -> Path:
+    path = config_path(git_internal)
+    path.write_text(json.dumps(config, indent=2) + "\n")
+    return path
+
+
+def _validate_target_name(name):
+    if not name or name in {".", ".."}:
+        return "Invalid target name"
+    if Path(name).name != name or "/" in name or "\\" in name:
+        return f"Invalid target name: {name}"
+    return None
+
+
+@dataclass(frozen=True)
+class SyncPlan:
+    """Resolved sync plan node.
+
+    This is the main DAG edge bundle for prepare -> report -> execute.
+    """
+
+    source: Path
+    dest: Path
+    target: dict
+    sync_files: list
+    excluded: list
+    unmatched: list
+    blocked: list
+    mode_label: str
+    actions: dict
+    check_results: list
+    state_hashes: dict
+
+
+def config_read(git_internal) -> Tuple[Optional[dict], List[str]]:
     """Load config from git internal dir. Returns (config, warnings)."""
     path = config_path(git_internal)
     if not path.exists():
@@ -241,7 +306,7 @@ def config_read(git_internal):
     return config, []
 
 
-def config_get_target(config, target_name):
+def config_get_target(config, target_name) -> Tuple[Optional[dict], Optional[str]]:
     """Merge target config with defaults. Returns (merged_dict, error_or_None)."""
     targets = config.get("targets", {})
     if target_name not in targets:
@@ -252,7 +317,7 @@ def config_get_target(config, target_name):
     return target, None
 
 
-def config_resolve_paths(target, git_internal, cwd_worktree):
+def config_resolve_paths(target, git_internal, cwd_worktree) -> Tuple[Optional[Path], Optional[Path], List[str]]:
     """Resolve source/dest paths for a target. Returns (source_path, dest_path, errors)."""
     errors = []
 
@@ -265,6 +330,9 @@ def config_resolve_paths(target, git_internal, cwd_worktree):
             return None, None, errors
     else:
         source_path = cwd_worktree
+        if source_path is None:
+            errors.append("Current worktree not set")
+            return None, None, errors
 
     # Resolve dest
     if "dest" in target:
@@ -289,10 +357,14 @@ def config_resolve_paths(target, git_internal, cwd_worktree):
     return source_path, dest_path, errors
 
 
-def config_add_target(git_internal, name, source="master", exclude=None, delete_policy="tracked_only"):
+def config_add_target(git_internal, name, source="master", exclude=None, delete_policy="tracked_only") -> Tuple[Optional[dict], Path, Optional[str]]:
     """Add target to config and save. Returns (config, path, error)."""
+    name_error = _validate_target_name(name)
+    if name_error:
+        return None, config_path(git_internal), name_error
+
     path = config_path(git_internal)
-    config = json.loads(path.read_text()) if path.exists() else dict(DEFAULT_CONFIG)
+    config = json.loads(path.read_text()) if path.exists() else new_config()
 
     if exclude is None:
         exclude = list(DEFAULT_EXCLUDE)
@@ -302,13 +374,17 @@ def config_add_target(git_internal, name, source="master", exclude=None, delete_
         "exclude": exclude,
         "delete_policy": delete_policy,
     }
-    path.write_text(json.dumps(config, indent=2) + "\n")
+    config_write(git_internal, config)
     logging.info(f"Updated config: {path}")
     return config, path, None
 
 
-def config_remove_target(git_internal, name):
+def config_remove_target(git_internal, name) -> Tuple[Optional[dict], Path, Optional[str]]:
     """Remove target from config and clean state. Returns (config, path, error)."""
+    name_error = _validate_target_name(name)
+    if name_error:
+        return None, config_path(git_internal), name_error
+
     path = config_path(git_internal)
     if not path.exists():
         return None, path, "Config not found"
@@ -318,28 +394,29 @@ def config_remove_target(git_internal, name):
         return config, path, f"Target '{name}' not in config"
 
     del config["targets"][name]
-    path.write_text(json.dumps(config, indent=2) + "\n")
+    config_write(git_internal, config)
     logging.info(f"Removed target '{name}' from config: {path}")
 
     # Clean state
     sp = state_path(git_internal)
     if sp.exists():
-        state = json.loads(sp.read_text())
-        state.get("last_sync", {}).pop(name, None)
-        sp.write_text(json.dumps(state, indent=2) + "\n")
-        logging.info(f"Cleaned '{name}' from state")
+        with _state_lock(git_internal):
+            state = state_read(git_internal)
+            state.get("last_sync", {}).pop(name, None)
+            _state_write(git_internal, state)
+            logging.info(f"Cleaned '{name}' from state")
 
     return config, path, None
 
 
-def config_init(git_internal, git_common):
+def config_init(git_internal, git_common) -> bool:
     """Create default config. Auto-detect worktrees as targets."""
     path = config_path(git_internal)
     if path.exists():
         print(f"  Config already exists: {path}")
         return False
 
-    config = dict(DEFAULT_CONFIG)
+    config = new_config()
     config["targets"] = {}
 
     # Auto-detect worktrees as potential targets
@@ -364,9 +441,7 @@ def config_init(git_internal, git_common):
         elif name == "runner":
             config["targets"][name] = {
                 "source": "master",
-                "include": ["lib/**/*.mjs", "src/**/*.mjs", "package.json"],
-                "exclude": ["tests/", "test/", "plan/"],
-                "protect": ["node_modules/", ".gitignore"],
+                "exclude": list(DEFAULT_EXCLUDE),
                 "delete_policy": "unlisted",
             }
         else:
@@ -375,81 +450,109 @@ def config_init(git_internal, git_common):
                 "exclude": list(DEFAULT_EXCLUDE),
             }
 
-    path.write_text(json.dumps(config, indent=2) + "\n")
+    config_write(git_internal, config)
     print(f"  Created: {path}")
     print(f"  Targets: {', '.join(config['targets'].keys()) or '(none — add manually)'}")
     return True
 
 
-# Backward compat (tests)
-load_config = config_read
-
-
 # == Filter Block =============================================================
 
-def filter_match(filepath, patterns):
-    """Check if filepath matches any of the glob patterns."""
-    s = str(filepath)
-    for pat in patterns:
-        if fnmatch.fnmatch(s, pat):
-            return True
-        # Recursive glob: "lib/**/*.mjs" should also match "lib/core.mjs" (zero dirs)
-        if "**/" in pat and fnmatch.fnmatch(s, pat.replace("**/", "")):
-            return True
-        # Directory prefix: "tests/" matches "tests/foo.mjs"
-        if pat.endswith("/") and s.startswith(pat.rstrip("/")):
-            return True
-        # Basename match: "*.log" matches "deep/dir/app.log"
-        if fnmatch.fnmatch(filepath.name, pat):
-            return True
-    return False
+_GITIGNORE_TEMP_DIRS = set()
 
 
-def filter_pipeline(files, include_patterns=None, exclude_patterns=None):
-    """Filter files through include → exclude pipeline.
+def _cleanup_gitignore_repos():
+    for path_str in list(_GITIGNORE_TEMP_DIRS):
+        shutil.rmtree(path_str, ignore_errors=True)
+    _GITIGNORE_TEMP_DIRS.clear()
 
-    Pipeline:
-      1. git ls-files → all tracked files (input)
-      2. include (if defined) → keep only matching files
-      3. exclude (if defined) → remove matching files
-      4. .git/ → always excluded (hardcoded)
 
-    Returns (passed, unmatched, blocked):
-      - passed: files that will sync (through both filters)
-      - unmatched: files that didn't match any include pattern
-      - blocked: files that matched include but were blocked by exclude
+atexit.register(_cleanup_gitignore_repos)
+
+
+def _normalize_patterns(patterns):
+    return tuple(
+        pat.replace("\\", "/")
+        for pat in patterns
+        if pat is not None and str(pat).strip() != ""
+    )
+
+
+@lru_cache(maxsize=256)
+def _gitignore_repo(patterns_key):
+    repo = Path(tempfile.mkdtemp(prefix="sync-worktree-gitignore-"))
+    _GITIGNORE_TEMP_DIRS.add(str(repo))
+    subprocess.run(["git", "init", "-q"], cwd=repo, capture_output=True, text=True)
+    (repo / ".gitignore").write_text("\n".join(patterns_key) + ("\n" if patterns_key else ""))
+    return repo
+
+
+def _gitignore_match_batch(paths, patterns_key):
+    """Return {posix_path: matched_bool} for worktree-relative posix paths."""
+    if not patterns_key:
+        return {path: False for path in paths}
+
+    paths = tuple(paths)
+    if not paths:
+        return {}
+
+    repo = _gitignore_repo(patterns_key)
+    result = subprocess.run(
+        ["git", "check-ignore", "--stdin"],
+        cwd=repo, capture_output=True, text=True,
+        input="\n".join(paths) + "\n",
+    )
+    matched = {line for line in result.stdout.splitlines() if line}
+    return {path: path in matched for path in paths}
+
+
+def filter_match_batch(paths, patterns) -> Dict[str, bool]:
+    """Batch gitignore match for worktree-relative paths."""
+    patterns_key = _normalize_patterns(patterns)
+    posix_paths = tuple(Path(path).as_posix() for path in paths)
+    return _gitignore_match_batch(posix_paths, patterns_key)
+
+
+def filter_match(filepath, patterns) -> bool:
+    """Check if filepath matches any configured pattern using gitignore syntax.
+
+    Paths are matched as worktree-relative paths. Pattern syntax follows
+    .gitignore rules: wildcards, directory rules, `**`, and `!` negation.
     """
-    pool = list(files)
+    path = Path(filepath).as_posix()
+    return filter_match_batch((path,), patterns).get(path, False)
 
-    # Step 2: include filter (whitelist)
+
+def filter_pipeline(files, include_patterns=None, exclude_patterns=None) -> Tuple[List[Path], List[Path], List[Path]]:
+    """Return files selected by config patterns, excluding `.git/`.
+
+    Patterns use gitignore syntax. include selects candidates, exclude removes
+    matches from the included set.
+    """
+    pool = [f for f in files if ".git" not in Path(f).parts]
+
     if include_patterns:
-        included = [f for f in pool if filter_match(f, include_patterns)]
-        unmatched = [f for f in pool if not filter_match(f, include_patterns)]
+        include_hits = filter_match_batch(pool, include_patterns)
+        included = [f for f in pool if include_hits.get(f.as_posix(), False)]
+        unmatched = [f for f in pool if not include_hits.get(f.as_posix(), False)]
     else:
         included = pool
         unmatched = []
 
-    # Step 3: exclude filter (blacklist)
     if exclude_patterns:
-        blocked = [f for f in included if filter_match(f, exclude_patterns)]
-        passed = [f for f in included if not filter_match(f, exclude_patterns)]
+        exclude_hits = filter_match_batch(included, exclude_patterns)
+        blocked = [f for f in included if exclude_hits.get(f.as_posix(), False)]
+        passed = [f for f in included if not exclude_hits.get(f.as_posix(), False)]
     else:
         blocked = []
         passed = included
 
-    # Step 4: .git/ hardcoded exclusion
-    passed = [f for f in passed if ".git" not in f.parts]
-
     return sorted(passed), unmatched, blocked
-
-
-# Backward compat (tests)
-_match_any = filter_match
 
 
 # == Sync Block ===============================================================
 
-def file_hash(filepath):
+def file_hash(filepath) -> str:
     """SHA256 hash of file content."""
     h = hashlib.sha256()
     with open(filepath, "rb") as fh:
@@ -461,7 +564,7 @@ def file_hash(filepath):
     return h.hexdigest()
 
 
-def sync_diff(source, dest, sync_files, delete_policy, state_hashes=None, protect=None):
+def sync_diff(source, dest, sync_files, delete_policy, state_hashes=None, protect=None) -> Dict[str, List[Path]]:
     """Compare source vs dest. Returns dict of categorized file actions.
 
     Status codes (git-style):
@@ -506,8 +609,9 @@ def sync_diff(source, dest, sync_files, delete_policy, state_hashes=None, protec
 
         # Split into delete vs protected
         if protect and candidates:
+            protect_hits = filter_match_batch(sorted(candidates), protect)
             for f in sorted(candidates):
-                if filter_match(f, protect):
+                if protect_hits.get(f.as_posix(), False):
                     actions['P'].append(f)
                 else:
                     actions['D'].append(f)
@@ -517,7 +621,7 @@ def sync_diff(source, dest, sync_files, delete_policy, state_hashes=None, protec
     return actions
 
 
-def sync_apply(source, dest, add, update, delete):
+def sync_apply(source, dest, add, update, delete) -> Dict[str, str]:
     """Execute sync actions. Returns file_hashes for state."""
     hashes = {}
 
@@ -549,8 +653,93 @@ def sync_apply(source, dest, add, update, delete):
     return hashes
 
 
+def _warn_on_zero_match(patterns, files, label, severity, target_config, warnings) -> None:
+    if not patterns or not target_config.get("warn_no_match", True):
+        return
+    for pat in patterns:
+        matched_map = filter_match_batch(files, [pat])
+        if not any(matched_map.values()):
+            warnings.append((severity, f"{label} pattern matches 0 files: {pat}"))
+
+
+def _check_source_dirty(source, target_config, warnings) -> None:
+    if not target_config.get("warn_dirty", True):
+        return
+    ok, status = git_try("status", "--porcelain", cwd=source)
+    if ok and status:
+        dirty_count = len(status.strip().split("\n"))
+        warnings.append(("warn", f"C1: Source has {dirty_count} uncommitted change(s)"))
+
+
+def _check_staged_overlap(source, sync_set, warnings) -> None:
+    ok, staged_out = git_try("diff", "--cached", "--name-only", cwd=source)
+    if ok and staged_out:
+        staged = set(staged_out.strip().split("\n"))
+        overlap = staged & sync_set
+        if overlap:
+            warnings.append(("warn", f"C3: {len(overlap)} staged-but-uncommitted file(s) in sync set: {', '.join(sorted(overlap)[:5])}"))
+
+
+def _check_untracked_include(source, include_patterns, warnings) -> None:
+    ok, untracked_out = git_try("ls-files", "--others", "--exclude-standard", cwd=source)
+    if not ok or not untracked_out:
+        return
+    untracked = [Path(f) for f in untracked_out.strip().split("\n") if f]
+    hits_map = filter_match_batch(untracked, include_patterns)
+    hits = [f for f in untracked if hits_map.get(f.as_posix(), False)]
+    if hits:
+        names = [str(f) for f in hits[:5]]
+        warnings.append(("warn", f"C4: {len(hits)} untracked file(s) match include patterns: {', '.join(names)}"))
+
+
+def _check_gitignored_sync_files(source, sync_files, warnings) -> None:
+    if not sync_files:
+        return
+    try:
+        result = subprocess.run(
+            ["git", "check-ignore", "--stdin"],
+            input="\n".join(str(f) for f in sync_files),
+            cwd=source, capture_output=True, text=True,
+        )
+        if result.stdout.strip():
+            ignored = result.stdout.strip().split("\n")
+            warnings.append(("warn", f"C5: {len(ignored)} sync file(s) are gitignored: {', '.join(ignored[:5])}"))
+    except (OSError, RuntimeError):
+        pass  # git check-ignore not available
+
+
+def _check_target_modifications(dest, state_hashes, warnings) -> None:
+    if not dest or not dest.exists() or not state_hashes:
+        return
+    modified = []
+    for rel_str, expected_hash in state_hashes.items():
+        dst = dest / rel_str
+        if dst.exists():
+            actual = file_hash(dst)
+            if actual != expected_hash:
+                modified.append(rel_str)
+    if modified:
+        names = modified[:5]
+        warnings.append(("error", f"C6: Target has {len(modified)} locally modified file(s): {', '.join(names)}"))
+
+
+def _check_target_divergence(git_internal, target_config, warnings) -> None:
+    if not git_internal:
+        return
+    source_branch = target_config.get("source", "master")
+    target_name = target_config.get("_name", "")
+    if target_name:
+        ok, log_out = git_try(
+            "log", f"{source_branch}..{target_name}", "--oneline",
+            cwd=git_internal,
+        )
+        if ok and log_out:
+            diverged = len(log_out.strip().split("\n"))
+            warnings.append(("warn", f"C7: Target '{target_name}' has {diverged} commit(s) not in '{source_branch}'"))
+
+
 def sync_check(source, dest, target_config, sync_files, excluded_files,
-               state_hashes=None, git_internal=None):
+               state_hashes=None, git_internal=None) -> List[Tuple[str, str]]:
     """L0 (git) x L1 (config) cross-check. Returns list of (severity, message).
 
     Checks:
@@ -567,93 +756,20 @@ def sync_check(source, dest, target_config, sync_files, excluded_files,
     sync_set = set(str(f) for f in sync_files)
     logging.debug(f"Cross-checking {len(sync_files)} files")
 
-    # C1: Source dirty (uncommitted changes)
-    if target_config.get("warn_dirty", True):
-        ok, status = git_try("status", "--porcelain", cwd=source)
-        if ok and status:
-            dirty_count = len(status.strip().split("\n"))
-            warnings.append(("warn", f"C1: Source has {dirty_count} uncommitted change(s)"))
-
-    # C2: Include pattern matches 0 files
-    if target_config.get("include") and target_config.get("warn_no_match", True):
-        all_files = sync_files + excluded_files
-        for pat in target_config["include"]:
-            matched = any(filter_match(f, [pat]) for f in all_files)
-            if not matched:
-                warnings.append(("warn", f"C2: Include pattern matches 0 files: {pat}"))
-
-    # C3: Source has staged but uncommitted changes that overlap sync files
-    ok, staged_out = git_try("diff", "--cached", "--name-only", cwd=source)
-    if ok and staged_out:
-        staged = set(staged_out.strip().split("\n"))
-        overlap = staged & sync_set
-        if overlap:
-            warnings.append(("warn", f"C3: {len(overlap)} staged-but-uncommitted file(s) in sync set: {', '.join(sorted(overlap)[:5])}"))
-
-    # C4: Include patterns match untracked files (won't be synced)
+    _check_source_dirty(source, target_config, warnings)
+    _warn_on_zero_match(target_config.get("include"), sync_files + excluded_files, "C2: Include", "warn", target_config, warnings)
+    _check_staged_overlap(source, sync_set, warnings)
     if target_config.get("include"):
-        ok, untracked_out = git_try(
-            "ls-files", "--others", "--exclude-standard", cwd=source
-        )
-        if ok and untracked_out:
-            untracked = [Path(f) for f in untracked_out.strip().split("\n") if f]
-            hits = [f for f in untracked if filter_match(f, target_config["include"])]
-            if hits:
-                names = [str(f) for f in hits[:5]]
-                warnings.append(("warn", f"C4: {len(hits)} untracked file(s) match include patterns: {', '.join(names)}"))
-
-    # C5: Include patterns match gitignored files
-    if target_config.get("include") and sync_files:
-        try:
-            result = subprocess.run(
-                ["git", "check-ignore", "--stdin"],
-                input="\n".join(str(f) for f in sync_files),
-                cwd=source, capture_output=True, text=True,
-            )
-            if result.stdout.strip():
-                ignored = result.stdout.strip().split("\n")
-                warnings.append(("warn", f"C5: {len(ignored)} sync file(s) are gitignored: {', '.join(ignored[:5])}"))
-        except (OSError, RuntimeError):
-            pass  # git check-ignore not available
-
-    # C6: Target has local modifications (full state hash comparison)
-    if dest and dest.exists() and state_hashes:
-        modified = []
-        for rel_str, expected_hash in state_hashes.items():
-            dst = dest / rel_str
-            if dst.exists():
-                actual = file_hash(dst)
-                if actual != expected_hash:
-                    modified.append(rel_str)
-        if modified:
-            names = modified[:5]
-            warnings.append(("error", f"C6: Target has {len(modified)} locally modified file(s): {', '.join(names)}"))
-
-    # C7: Target worktree has diverged (commits in target not in source)
-    if git_internal:
-        source_branch = target_config.get("source", "master")
-        target_name = target_config.get("_name", "")
-        if target_name:
-            ok, log_out = git_try(
-                "log", f"{source_branch}..{target_name}", "--oneline",
-                cwd=git_internal,
-            )
-            if ok and log_out:
-                diverged = len(log_out.strip().split("\n"))
-                warnings.append(("warn", f"C7: Target '{target_name}' has {diverged} commit(s) not in '{source_branch}'"))
-
-    # C8: Exclude pattern matches 0 files (may indicate stale pattern)
-    if target_config.get("exclude") and target_config.get("warn_no_match", True):
-        all_files = sync_files + excluded_files
-        for pat in target_config["exclude"]:
-            matched = any(filter_match(f, [pat]) for f in all_files)
-            if not matched:
-                warnings.append(("silent", f"C8: Exclude pattern matches 0 files: {pat}"))
+        _check_untracked_include(source, target_config["include"], warnings)
+    _check_gitignored_sync_files(source, sync_files, warnings)
+    _check_target_modifications(dest, state_hashes, warnings)
+    _check_target_divergence(git_internal, target_config, warnings)
+    _warn_on_zero_match(target_config.get("exclude"), sync_files + excluded_files, "C8: Exclude", "silent", target_config, warnings)
 
     return warnings
 
 
-def sync_classify_checks(check_results, force=False, verbose=False):
+def sync_classify_checks(check_results, force=False, verbose=False) -> Tuple[List[str], List[str]]:
     """Split check results into warnings/errors/silent lists.
 
     --force downgrades errors to warnings. --verbose includes silent.
@@ -671,16 +787,9 @@ def sync_classify_checks(check_results, force=False, verbose=False):
     return warnings, errors
 
 
-# Backward compat (tests)
-compute_actions = sync_diff
-cross_check = sync_check
-classify_checks = sync_classify_checks
-apply_actions = sync_apply
-
-
 # == State Block ==============================================================
 
-def state_read(git_internal):
+def state_read(git_internal) -> dict:
     """Load sync state file."""
     path = state_path(git_internal)
     if not path.exists():
@@ -691,63 +800,63 @@ def state_read(git_internal):
         return {}
 
 
-def state_save_sync(git_internal, target_name, source, file_hashes, add_count, update_count, delete_count):
+def state_save_sync(git_internal, target_name, source, file_hashes, add_count, update_count, delete_count) -> None:
     """Save sync state for a target."""
-    state = state_read(git_internal)
+    with _state_lock(git_internal):
+        state = state_read(git_internal)
 
-    # Get source commit
-    try:
-        commit = git_run("rev-parse", "--short", "HEAD", cwd=source)
-    except RuntimeError:
-        commit = "unknown"
+        # Get source commit
+        try:
+            commit = git_run("rev-parse", "--short", "HEAD", cwd=source)
+        except RuntimeError:
+            commit = "unknown"
 
-    if "last_sync" not in state:
-        state["last_sync"] = {}
+        if "last_sync" not in state:
+            state["last_sync"] = {}
 
-    state["last_sync"][target_name] = {
-        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "source_commit": commit,
-        "files_synced": add_count + update_count,
-        "files_deleted": delete_count,
-        "file_hashes": file_hashes,
-    }
+        state["last_sync"][target_name] = {
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "source_commit": commit,
+            "files_synced": add_count + update_count,
+            "files_deleted": delete_count,
+            "file_hashes": file_hashes,
+        }
 
-    path = state_path(git_internal)
-    path.write_text(json.dumps(state, indent=2) + "\n")
+        _state_write(git_internal, state)
 
 
 def state_save_run(git_internal, targets, mode, checks_passed, warnings_count,
-                   errors_count, all_actions):
+                   errors_count, all_actions) -> None:
     """Record last_run state for all targets.
 
     all_actions: dict mapping target_name -> actions dict
     """
-    state = state_read(git_internal)
+    with _state_lock(git_internal):
+        state = state_read(git_internal)
 
-    # Aggregate summary across all targets
-    summary = {'A': 0, 'M': 0, 'D': 0}
-    for target_name, actions in all_actions.items():
-        summary['A'] += len(actions.get('A', []))
-        summary['M'] += len(actions.get('M', []))
-        summary['D'] += len(actions.get('D', []))
+        # Aggregate summary across all targets
+        summary = {'A': 0, 'M': 0, 'D': 0}
+        for target_name, actions in all_actions.items():
+            summary['A'] += len(actions.get('A', []))
+            summary['M'] += len(actions.get('M', []))
+            summary['D'] += len(actions.get('D', []))
 
-    state["last_run"] = {
-        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "command": "sync_worktree.py " + " ".join(sys.argv[1:]) if len(sys.argv) > 1 else "sync_worktree.py",
-        "mode": mode,
-        "checks_passed": checks_passed,
-        "warnings": warnings_count,
-        "errors": errors_count,
-        "targets": targets,
-        "summary": summary,
-    }
+        state["last_run"] = {
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "command": "sync_worktree.py " + " ".join(sys.argv[1:]) if len(sys.argv) > 1 else "sync_worktree.py",
+            "mode": mode,
+            "checks_passed": checks_passed,
+            "warnings": warnings_count,
+            "errors": errors_count,
+            "targets": targets,
+            "summary": summary,
+        }
 
-    logging.debug(f"Saving last_run: {state['last_run']}")
-    path = state_path(git_internal)
-    path.write_text(json.dumps(state, indent=2) + "\n")
+        logging.debug(f"Saving last_run: {state['last_run']}")
+        _state_write(git_internal, state)
 
 
-def state_check_gate(git_internal, apply, force):
+def state_check_gate(git_internal, apply, force) -> bool:
     """Safety gate: check if --apply can proceed based on last_run.
 
     Returns True if safe to proceed, False otherwise.
@@ -779,13 +888,6 @@ def state_check_gate(git_internal, apply, force):
     return True
 
 
-# Backward compat (tests)
-load_state = state_read
-save_state = state_save_sync
-save_last_run = state_save_run
-check_last_run_gate = state_check_gate
-
-
 # == Report Block =============================================================
 
 STATUS_LABELS = {
@@ -799,20 +901,9 @@ STATUS_LABELS = {
 
 
 def report_target(target_name, actions, warnings, excluded, mode_label,
-                  verbose=False, as_json=False):
+                  verbose=False) -> None:
     """Print sync report for one target."""
     changes = len(actions['A']) + len(actions['M']) + len(actions['D'])
-
-    if as_json:
-        print(json.dumps({
-            "target": target_name,
-            "mode": mode_label,
-            "actions": {k: [str(f) for f in v] for k, v in actions.items()},
-            "warnings": warnings,
-            "summary": {k: len(v) for k, v in actions.items()},
-            "changes": changes,
-        }))
-        return
 
     print(f"\n  [{target_name}] {mode_label}")
 
@@ -858,7 +949,7 @@ def report_target(target_name, actions, warnings, excluded, mode_label,
         print(f"\n    Summary: {' | '.join(parts)}")
 
 
-def report_diff(source, dest, update_files):
+def report_diff(source, dest, update_files) -> None:
     """Show brief diff for updated files."""
     if not update_files:
         return
@@ -874,7 +965,7 @@ def report_diff(source, dest, update_files):
         print(f"      ... and {len(update_files) - 10} more")
 
 
-def report_config_schema():
+def report_config_schema() -> None:
     """Print config schema reference and exit."""
     schema = """{
   "version": 1,
@@ -889,9 +980,9 @@ def report_config_schema():
     "runner": {
       "source": "master",           // source worktree (default: current)
       "dest": "/opt/app/",          // dest path (default: worktree by name)
-      "include": ["lib/**"],        // keep only matching (default: all)
-      "exclude": ["tests/"],        // remove matching
-      "protect": ["node_modules/"], // never delete these in dest
+      "include": ["lib/**/*.mjs"],  // gitignore syntax
+      "exclude": [".gitignore"],    // gitignore syntax
+      "protect": ["node_modules/"], // gitignore syntax
       "delete_policy": "never",     // override default
       "pre_sync": "npm run build",
       "post_sync": "pm2 restart"
@@ -905,28 +996,85 @@ Delete policies:
   tracked_only Delete only previously synced files
 
 Filter pipeline: git ls-files → include → exclude → .git/ (hardcoded)
+Default exclude: .gitignore
+Match mode: gitignore syntax (.gitignore-compatible)
 """
     print(schema)
     sys.exit(0)
 
 
-# Backward compat (tests)
-print_report = report_target
-print_diff = report_diff
-print_help_config = report_config_schema
+def report_config(config) -> None:
+    """Print a human-readable config summary."""
+    print(f"version: {config.get('version')}")
+    defaults = config.get("defaults", {})
+    if defaults:
+        print("defaults:")
+        for key in sorted(defaults):
+            print(f"  {key}: {defaults[key]}")
+    targets = config.get("targets", {})
+    if not targets:
+        print("targets: (none)")
+        return
+    print("targets:")
+    for name in sorted(targets):
+        target = targets[name]
+        print(f"  {name}:")
+        for key in sorted(target):
+            value = target[key]
+            print(f"    {key}: {value}")
+
+
+def report_status(state) -> None:
+    """Print a human-readable sync status summary."""
+    last_run = state.get("last_run")
+    last_sync = state.get("last_sync", {})
+
+    if not last_run and not last_sync:
+        print("status: empty")
+        return
+
+    if last_run:
+        print("last_run:")
+        for key in ("timestamp", "command", "mode", "checks_passed", "warnings", "errors"):
+            if key in last_run:
+                print(f"  {key}: {last_run[key]}")
+        targets = last_run.get("targets", [])
+        if targets:
+            print(f"  targets: {', '.join(targets)}")
+        summary = last_run.get("summary", {})
+        if summary:
+            print("  summary:")
+            for key in sorted(summary):
+                print(f"    {key}: {summary[key]}")
+
+    if last_sync:
+        print("last_sync:")
+        for name in sorted(last_sync):
+            entry = last_sync[name]
+            print(f"  {name}:")
+            for key in ("timestamp", "source_commit", "files_synced", "files_deleted"):
+                if key in entry:
+                    print(f"    {key}: {entry[key]}")
 
 
 # == Sync Orchestration (no block marker, top-level functions) ================
 
-def setup_logging(topology, targets, log_dir=None, no_log=False):
+def setup_logging(topology, targets, log_dir=None, no_log=False, scope_label=None) -> logging.Logger:
     """Configure logging. Returns logger.
 
-    Log filename: <topology>-<target>-<YYYYMMDD-HHMMSS>.log (single)
-                  <topology>-all-<YYYYMMDD-HHMMSS>.log (multi)
+    Log filename: <scope>-<target>-<YYYYMMDD>.log (single)
+                  <scope>-all-<YYYYMMDD>.log (multi)
     Default log dir: script_dir/logs/
     """
-    if no_log:
+    def reset_root_logger():
         logger = logging.getLogger()
+        for handler in logger.handlers[:]:
+            handler.close()
+            logger.removeHandler(handler)
+        return logger
+
+    if no_log:
+        logger = reset_root_logger()
         logger.addHandler(logging.NullHandler())
         logger.setLevel(logging.DEBUG)
         return logger
@@ -940,11 +1088,12 @@ def setup_logging(topology, targets, log_dir=None, no_log=False):
     log_dir.mkdir(parents=True, exist_ok=True)
 
     # Determine filename
-    ts = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+    ts = datetime.utcnow().strftime("%Y%m%d")
     target_label = targets[0] if len(targets) == 1 else "all"
-    log_file = log_dir / f"{topology}-{target_label}-{ts}.log"
+    scope = scope_label or topology
+    log_file = log_dir / f"{scope}-{target_label}-{ts}.log"
 
-    logger = logging.getLogger()
+    logger = reset_root_logger()
     logger.addHandler(logging.NullHandler())
     logger.setLevel(logging.DEBUG)
 
@@ -956,13 +1105,14 @@ def setup_logging(topology, targets, log_dir=None, no_log=False):
     logger.addHandler(fh)
 
     logging.info(f"Logging to {log_file}")
+    logging.info("=== RUN START %s ===", datetime.utcnow().strftime("%H:%M:%S"))
     return logger
 
 
-def prepare_sync(config, target_name, git_internal, topology, cwd_worktree):
+def prepare_sync(config, target_name, git_internal, topology, cwd_worktree) -> Tuple[Optional[SyncPlan], List[str]]:
     """Pure computation: resolve target, filter files, cross-check, compute actions.
 
-    Returns dict with all computed data, or None + errors on failure.
+    Returns SyncPlan with all computed data, or None + errors on failure.
     No I/O beyond git queries (read-only).
     """
     logging.info(f"Preparing sync for target: {target_name}")
@@ -971,7 +1121,7 @@ def prepare_sync(config, target_name, git_internal, topology, cwd_worktree):
     if err:
         return None, [err]
 
-    target["_name"] = target_name
+    target = {**target, "_name": target_name}
     source, dest, path_errors = config_resolve_paths(target, git_internal, cwd_worktree)
     if path_errors:
         logging.error(f"Failed to resolve target {target_name}: {path_errors}")
@@ -1005,30 +1155,41 @@ def prepare_sync(config, target_name, git_internal, topology, cwd_worktree):
     protect = target.get("protect", [])
     actions = sync_diff(source, dest, sync_files, delete_policy, state_hashes, protect)
 
-    return {
-        "source": source, "dest": dest, "target": target,
-        "sync_files": sync_files, "excluded": excluded,
-        "unmatched": unmatched, "blocked": blocked,
-        "mode_label": mode_label, "actions": actions,
-        "check_results": check_results, "state_hashes": state_hashes,
-    }, []
+    return SyncPlan(
+        source=source,
+        dest=dest,
+        target=target,
+        sync_files=sync_files,
+        excluded=excluded,
+        unmatched=unmatched,
+        blocked=blocked,
+        mode_label=mode_label,
+        actions=actions,
+        check_results=check_results,
+        state_hashes=state_hashes,
+    ), []
 
 
 def execute_sync(source, dest, actions, sync_files, state_hashes,
-                 target, target_name, git_internal):
+                 target, target_name, git_internal) -> Tuple[bool, Dict[str, str]]:
     """I/O boundary: copy/delete files, run hooks, save state.
 
     Returns (success, file_hashes).
     """
+    logging.debug(
+        "execute_sync start: target=%s add=%d update=%d delete=%d",
+        target_name, len(actions['A']), len(actions['M']), len(actions['D']),
+    )
     add, update, delete = actions['A'], actions['M'], actions['D']
     total = len(add) + len(update) + len(delete)
     if total == 0:
+        logging.debug("execute_sync noop: target=%s", target_name)
         return True, {}
 
     pre_sync = target.get("pre_sync")
     if pre_sync:
         print(f"\n    Running pre_sync: {pre_sync}")
-        result = subprocess.run(pre_sync, shell=True, cwd=str(source))
+        result = subprocess.run(shlex.split(pre_sync), cwd=str(source))
         if result.returncode != 0:
             print(f"  ERROR: pre_sync failed (exit {result.returncode})", file=sys.stderr)
             return False, {}
@@ -1047,20 +1208,24 @@ def execute_sync(source, dest, actions, sync_files, state_hashes,
 
     state_save_sync(git_internal, target_name, source, file_hashes,
                     len(add), len(update), len(delete))
+    logging.debug("execute_sync done: target=%s", target_name)
 
     post_sync = target.get("post_sync")
     if post_sync:
         print(f"\n    Running post_sync: {post_sync}")
-        subprocess.run(post_sync, shell=True, cwd=str(dest))
+        result = subprocess.run(shlex.split(post_sync), cwd=str(dest))
+        if result.returncode != 0:
+            print(f"  ERROR: post_sync failed (exit {result.returncode})", file=sys.stderr)
+            logging.warning("post_sync failed after sync: target=%s exit=%s", target_name, result.returncode)
 
     return True, file_hashes
 
 
 def sync_target(config, target_name, git_internal, topology, cwd_worktree,
                 apply=False, strict=False, force=False, verbose=False,
-                show_diff=False, as_json=False):
+                show_diff=False) -> Tuple[bool, bool, Dict[str, List[Path]]]:
     """Orchestrate one target sync. Returns (success, has_warnings, actions)."""
-    prepared, errors = prepare_sync(
+    plan, errors = prepare_sync(
         config, target_name, git_internal, topology, cwd_worktree
     )
     if errors:
@@ -1068,11 +1233,11 @@ def sync_target(config, target_name, git_internal, topology, cwd_worktree,
             print(f"  ERROR: {e}", file=sys.stderr)
         return False, False, {}
 
-    source = prepared["source"]
-    dest = prepared["dest"]
-    actions = prepared["actions"]
+    source = plan.source
+    dest = plan.dest
+    actions = plan.actions
     warnings, errors = sync_classify_checks(
-        prepared["check_results"], force=force, verbose=verbose
+        plan.check_results, force=force, verbose=verbose
     )
 
     if errors:
@@ -1081,12 +1246,11 @@ def sync_target(config, target_name, git_internal, topology, cwd_worktree,
         print(f"  Use --force to override.", file=sys.stderr)
         return False, True, actions
 
-    if not as_json:
-        print(f"\n  Source: {source}")
-        print(f"  Target: {dest}")
+    print(f"\n  Source: {source}")
+    print(f"  Target: {dest}")
 
-    report_target(target_name, actions, warnings, prepared["excluded"],
-                  prepared["mode_label"], verbose=verbose, as_json=as_json)
+    report_target(target_name, actions, warnings, plan.excluded,
+                  plan.mode_label, verbose=verbose)
 
     if show_diff:
         report_diff(source, dest, actions['M'])
@@ -1099,16 +1263,16 @@ def sync_target(config, target_name, git_internal, topology, cwd_worktree,
 
     if apply:
         ok, _ = execute_sync(
-            source, dest, actions, prepared["sync_files"],
-            prepared["state_hashes"], prepared["target"],
+            source, dest, actions, plan.sync_files,
+            plan.state_hashes, plan.target,
             target_name, git_internal,
         )
         if not ok:
             return False, has_warnings, actions
         add, update, delete = actions['A'], actions['M'], actions['D']
-        if not as_json and (len(add) + len(update) + len(delete)) > 0:
+        if (len(add) + len(update) + len(delete)) > 0:
             print(f"\n    Done. A:{len(add)} M:{len(update)} D:{len(delete)}")
-    elif not as_json:
+    else:
         add, update, delete = actions['A'], actions['M'], actions['D']
         if (len(add) + len(update) + len(delete)) > 0:
             print("\n    Run with --apply to execute.")
@@ -1116,7 +1280,7 @@ def sync_target(config, target_name, git_internal, topology, cwd_worktree,
     return True, has_warnings, actions
 
 
-def cmd_add_target(name, git_internal, topology):
+def cmd_add_target(name, git_internal, topology) -> None:
     """Create empty orphan worktree and add to config."""
     project_root = git_internal.parent if topology == "bare" else Path.cwd().resolve()
     logging.info(f"Adding target: {name}")
@@ -1138,7 +1302,10 @@ def cmd_add_target(name, git_internal, topology):
         print(f"Error: Failed to set up orphan branch: {e}", file=sys.stderr)
         sys.exit(1)
 
-    _, path, _ = config_add_target(git_internal, name)
+    _, path, err = config_add_target(git_internal, name)
+    if err:
+        print(f"Error: {err}", file=sys.stderr)
+        sys.exit(1)
 
     print(f"\nCreated worktree: {name}")
     print(f"  Path: {wt_path}")
@@ -1148,7 +1315,7 @@ def cmd_add_target(name, git_internal, topology):
     print(f"  Delete policy: tracked_only")
 
 
-def cmd_remove_target(name, git_internal, topology):
+def cmd_remove_target(name, git_internal, topology) -> None:
     """Remove worktree, branch, config entry, and state."""
     project_root = git_internal.parent if topology == "bare" else Path.cwd().resolve()
     wt_path = git_resolve_worktree(name, git_internal)
@@ -1183,7 +1350,7 @@ def cmd_remove_target(name, git_internal, topology):
 
 # == CLI Block ================================================================
 
-def init_bare(url):
+def init_bare(url) -> None:
     """Clone remote as bare repo + set up worktree structure."""
     cwd = Path.cwd()
     bare_dir = cwd / ".bare"
@@ -1213,10 +1380,10 @@ def init_bare(url):
     print(f"  Bare repo: {bare_dir}")
     print(f"  Worktree: {cwd / 'master'}")
     print(f"\nNext: cd master && git config user.email/user.name")
-    print(f"      {Path(__file__).name} --add-target release")
+    print(f"      {Path(__file__).name} add-target release")
 
 
-def _finalize_migration(cwd, bare_dir, current_branch):
+def _finalize_migration(cwd, bare_dir, current_branch) -> Path:
     """Complete post-migration setup: config, prune, worktree."""
     try:
         git_run("config", "core.bare", "true", cwd=bare_dir)
@@ -1235,7 +1402,7 @@ def _finalize_migration(cwd, bare_dir, current_branch):
     return wt_path
 
 
-def migrate_to_bare():
+def migrate_to_bare() -> None:
     """Convert existing regular repo to bare + worktree structure."""
     cwd = Path.cwd().resolve()
     git_dir = cwd / ".git"
@@ -1275,156 +1442,102 @@ def migrate_to_bare():
     print(f"  Bare repo: {bare_dir}")
     print(f"  Worktree: {wt_path} ({current_branch})")
     print(f"\nNext: cd {current_branch} && work normally")
-    print(f"      {Path(__file__).name} --init")
+    print(f"      {Path(__file__).name} init")
 
 
-# Legacy names for CLI (backward compat)
-add_target = cmd_add_target
+def build_cli_parser() -> argparse.ArgumentParser:
+    epilog = "Dry-run by default. Use `sync --apply` to execute."
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("--log-dir", default=None, help="Override log directory (default: script_dir/logs/)")
+    common.add_argument("--no-log", action="store_true", help="Disable file logging")
 
-
-def main():
-    epilog = """Workflow:
-  0. Repo     %(prog)s --init-bare <url>         clone bare + master worktree
-              %(prog)s --add-target release      empty orphan + add to config
-              %(prog)s --remove-target release   remove worktree + config entry
-              %(prog)s --migrate                 convert existing repo to bare
-  1. Setup    %(prog)s --init            auto-detect worktrees, create config
-              %(prog)s --help-config     config schema reference with field docs
-              %(prog)s --config          verify resolved config as JSON
-  2. Preview  %(prog)s                   dry-run all targets
-              %(prog)s runner            dry-run specific target
-              %(prog)s runner -v         include unchanged/excluded/protected
-              %(prog)s runner --diff     show file content diffs
-  3. Execute  %(prog)s runner --apply    sync files (requires prior dry-run)
-              %(prog)s --apply --force   skip dry-run gate + override C6 errors
-  4. Verify   %(prog)s --status          last sync state (commit, hashes, counts)
-              %(prog)s runner --json     machine-readable output for scripting
-  5. Commit   cd ../release && git add -A && git status -s
-              git commit -m "feat: vX.Y.Z" && git push origin release
-  CI:         %(prog)s --strict          exit 2 on any warning (C1-C7)
-              %(prog)s --strict --json   CI pipeline with structured output
-Safety: dry-run → preview → --apply. No prior dry-run = blocked unless --force.
-Targets start empty (orphan branch). Edit in master/, sync out. Never edit targets.
-"""
-    parser = argparse.ArgumentParser(
-        description="Config-driven worktree sync. Dry-run by default.",
+    parser = HelpOnErrorParser(
+        description="Git-style worktree sync.",
         epilog=epilog,
         formatter_class=argparse.RawDescriptionHelpFormatter,
+        parents=[common],
     )
-    parser.add_argument(
-        "targets", nargs="*", default=[],
-        help="Target name(s) from config. Default: all targets."
-    )
-    parser.add_argument("--init-bare", metavar="URL", help="Clone remote as bare repo + master worktree")
-    parser.add_argument("--add-target", metavar="NAME", help="Create empty orphan worktree + add to config")
-    parser.add_argument("--remove-target", metavar="NAME", help="Remove worktree + branch + config entry")
-    parser.add_argument("--migrate", action="store_true", help="Convert existing repo to bare + worktree")
-    parser.add_argument("--apply", action="store_true", help="Execute sync (default: dry-run)")
-    parser.add_argument("--strict", action="store_true", help="Abort on any warning (CI mode)")
-    parser.add_argument("--force", action="store_true", help="Overwrite target local modifications")
-    parser.add_argument("--init", action="store_true", help="Create default config")
-    parser.add_argument("--config", action="store_true", help="Print resolved config and exit")
-    parser.add_argument("--status", action="store_true", help="Print last sync state and exit")
-    parser.add_argument("--help-config", action="store_true", help="Show config schema and exit")
-    parser.add_argument("--diff", action="store_true", help="Show content diff for updates")
-    parser.add_argument("-v", "--verbose", action="store_true", help="Show filtered/skipped files")
-    parser.add_argument("-q", "--quiet", action="store_true", help="Summary only")
-    parser.add_argument("--json", action="store_true", help="JSON output (CI)")
-    parser.add_argument("--log-dir", default=None, help="Override log directory (default: script_dir/logs/)")
-    parser.add_argument("--no-log", action="store_true", help="Disable file logging")
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
-    args = parser.parse_args()
 
-    # No arguments at all → show help (only from terminal)
-    if len(sys.argv) == 1 and sys.stdin.isatty():
-        parser.print_help()
-        return
+    sub = parser.add_subparsers(dest="command", required=True)
 
-    # --help-config
-    if args.help_config:
-        report_config_schema()
+    p = sub.add_parser("help-config", help="Schema", parents=[common])
+    p.set_defaults(command="help-config")
 
-    # --init-bare (before topology detection since repo doesn't exist yet)
-    if args.init_bare:
-        setup_logging("init-bare", [], log_dir=args.log_dir, no_log=args.no_log)
-        init_bare(args.init_bare)
-        return
+    p = sub.add_parser("init-bare", help="Bare init", parents=[common])
+    p.add_argument("url")
+    p.set_defaults(command="init-bare")
 
-    # --migrate (detect topology first, must be a regular repo)
-    if args.migrate:
-        # Try simple repo detection without full topology
-        try:
-            git_run("rev-parse", "--git-dir")
-        except RuntimeError:
-            print("Error: not inside a git repository", file=sys.stderr)
-            sys.exit(1)
-        setup_logging("migrate", [], log_dir=args.log_dir, no_log=args.no_log)
-        migrate_to_bare()
-        return
+    p = sub.add_parser("migrate", help="Migrate repo", parents=[common])
+    p.set_defaults(command="migrate")
 
-    # Detect topology
+    p = sub.add_parser("add-target", help="Add target", parents=[common])
+    p.add_argument("name")
+    p.set_defaults(command="add-target")
+
+    p = sub.add_parser("remove-target", help="Remove target", parents=[common])
+    p.add_argument("name")
+    p.set_defaults(command="remove-target")
+
+    p = sub.add_parser("init", help="Init config", parents=[common])
+    p.set_defaults(command="init")
+
+    p = sub.add_parser("config", help="Show config", parents=[common])
+    p.set_defaults(command="config")
+
+    p = sub.add_parser("status", help="Show status", parents=[common])
+    p.set_defaults(command="status")
+
+    p = sub.add_parser("sync", help="Sync target(s)", parents=[common])
+    p.add_argument("targets", nargs="*", default=[])
+    p.add_argument("--apply", action="store_true", help="Apply")
+    p.add_argument("--strict", action="store_true", help="Warn->error")
+    p.add_argument("--force", action="store_true", help="Override checks")
+    p.add_argument("--diff", action="store_true", help="Show diffs")
+    p.add_argument("-v", "--verbose", action="store_true", help="Verbose")
+    p.add_argument("-q", "--quiet", action="store_true", help="Quiet")
+    p.set_defaults(command="sync")
+
+    return parser
+
+
+def run_sync_command(args) -> None:
     topology, git_internal, cwd_worktree = git_detect_topology()
 
-    # Determine targets early for logging setup
-    # Load config first
     config, config_errors = config_read(git_internal)
-    if config is None and not args.init:
+    if config is None:
         for e in config_errors:
             print(f"Error: {e}", file=sys.stderr)
-        print(f"\nRun with --init to create default config.", file=sys.stderr)
+        print(f"\nRun with 'sync-worktree init' to create default config.", file=sys.stderr)
         sys.exit(1)
 
-    target_names = args.targets or (list(config.get("targets", {}).keys()) if config else [])
-    setup_logging(topology, target_names, log_dir=args.log_dir, no_log=args.no_log)
+    target_names = args.targets or list(config.get("targets", {}).keys())
+    setup_logging(
+        topology,
+        target_names,
+        log_dir=args.log_dir,
+        no_log=args.no_log,
+        scope_label=_get_scope_label(topology, git_internal, cwd_worktree),
+    )
 
-    if not args.quiet and not args.json:
+    if not args.quiet:
         print(f"Topology: {topology}")
         print(f"Config: {config_path(git_internal)}")
 
     logging.info(f"Starting sync: mode={'apply' if args.apply else 'dry-run'}")
 
-    # --add-target
-    if args.add_target:
-        setup_logging("add-target", [args.add_target], log_dir=args.log_dir, no_log=args.no_log)
-        cmd_add_target(args.add_target, git_internal, topology)
-        return
-
-    # --remove-target
-    if args.remove_target:
-        setup_logging("remove-target", [args.remove_target], log_dir=args.log_dir, no_log=args.no_log)
-        cmd_remove_target(args.remove_target, git_internal, topology)
-        return
-
-    # --init
-    if args.init:
-        config_init(git_internal, git_internal)
-        return
-
-    # --config
-    if args.config:
-        print(json.dumps(config, indent=2))
-        return
-
-    # --status
-    if args.status:
-        state = state_read(git_internal)
-        print(json.dumps(state, indent=2))
-        return
-
     if not target_names:
         print("No targets defined in config.", file=sys.stderr)
         sys.exit(1)
 
-    if not args.quiet and not args.json:
+    if not args.quiet:
         run_mode = "APPLY" if args.apply else "DRY RUN"
         print(f"Mode: {run_mode}")
         print(f"Targets: {', '.join(target_names)}")
 
-    # Safety gate: check last_run before --apply
     if args.apply and not state_check_gate(git_internal, args.apply, args.force):
         sys.exit(1)
 
-    # Sync each target
     all_ok = True
     any_warnings = False
     all_actions = {}
@@ -1435,7 +1548,7 @@ Targets start empty (orphan branch). Edit in master/, sync out. Never edit targe
         ok, has_warn, actions = sync_target(
             config, name, git_internal, topology, cwd_worktree,
             apply=args.apply, strict=args.strict, force=args.force,
-            verbose=args.verbose, show_diff=args.diff, as_json=args.json,
+            verbose=args.verbose, show_diff=args.diff,
         )
         if not ok:
             all_ok = False
@@ -1446,7 +1559,6 @@ Targets start empty (orphan branch). Edit in master/, sync out. Never edit targe
         if actions:
             all_actions[name] = actions
 
-    # Save last_run state (after all targets complete)
     mode = "apply" if args.apply else "dry-run"
     checks_passed = all_ok and (not args.strict or not any_warnings)
     state_save_run(git_internal, target_names, mode, checks_passed,
@@ -1454,11 +1566,133 @@ Targets start empty (orphan branch). Edit in master/, sync out. Never edit targe
 
     logging.info(f"Sync complete: ok={all_ok}, warnings={total_warnings}, errors={total_errors}")
 
-    # Exit code
     if not all_ok:
         sys.exit(1)
     elif args.strict and any_warnings:
         sys.exit(2)
+
+
+def run_config_command(args) -> None:
+    topology, git_internal, cwd_worktree = git_detect_topology()
+    config, config_errors = config_read(git_internal)
+    if config is None:
+        for e in config_errors:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+    setup_logging(
+        topology,
+        list(config.get("targets", {}).keys()),
+        log_dir=args.log_dir,
+        no_log=args.no_log,
+        scope_label=_get_scope_label(topology, git_internal, cwd_worktree),
+    )
+    report_config(config)
+
+
+def run_status_command(args) -> None:
+    topology, git_internal, cwd_worktree = git_detect_topology()
+    state = state_read(git_internal)
+    setup_logging(
+        topology,
+        [],
+        log_dir=args.log_dir,
+        no_log=args.no_log,
+        scope_label=_get_scope_label(topology, git_internal, cwd_worktree),
+    )
+    report_status(state)
+
+
+def run_init_command(args) -> None:
+    topology, git_internal, cwd_worktree = git_detect_topology()
+    setup_logging(
+        topology,
+        [],
+        log_dir=args.log_dir,
+        no_log=args.no_log,
+        scope_label=_get_scope_label(topology, git_internal, cwd_worktree),
+    )
+    config_init(git_internal, git_internal)
+
+
+def run_help_config_command(_args) -> None:
+    report_config_schema()
+
+
+def run_init_bare_command(args) -> None:
+    cwd = Path.cwd().resolve()
+    setup_logging("init-bare", [], log_dir=args.log_dir, no_log=args.no_log, scope_label=cwd.name)
+    init_bare(args.url)
+
+
+def run_migrate_command(args) -> None:
+    try:
+        git_run("rev-parse", "--git-dir")
+    except RuntimeError:
+        print("Error: not inside a git repository", file=sys.stderr)
+        sys.exit(1)
+    cwd = Path.cwd().resolve()
+    setup_logging("migrate", [], log_dir=args.log_dir, no_log=args.no_log, scope_label=cwd.name)
+    migrate_to_bare()
+
+
+def run_add_target_command(args) -> None:
+    topology, git_internal, cwd_worktree = git_detect_topology()
+    setup_logging(
+        topology,
+        [args.name],
+        log_dir=args.log_dir,
+        no_log=args.no_log,
+        scope_label=_get_scope_label(topology, git_internal, cwd_worktree),
+    )
+    cmd_add_target(args.name, git_internal, topology)
+
+
+def run_remove_target_command(args) -> None:
+    topology, git_internal, cwd_worktree = git_detect_topology()
+    setup_logging(
+        topology,
+        [args.name],
+        log_dir=args.log_dir,
+        no_log=args.no_log,
+        scope_label=_get_scope_label(topology, git_internal, cwd_worktree),
+    )
+    cmd_remove_target(args.name, git_internal, topology)
+
+
+def main() -> None:
+    parser = build_cli_parser()
+    try:
+        if len(sys.argv) == 1 and sys.stdin.isatty():
+            parser.print_help()
+            return
+
+        args = parser.parse_args()
+
+        if args.command == "help-config":
+            run_help_config_command(args)
+        elif args.command == "init-bare":
+            run_init_bare_command(args)
+        elif args.command == "migrate":
+            run_migrate_command(args)
+        elif args.command == "add-target":
+            run_add_target_command(args)
+        elif args.command == "remove-target":
+            run_remove_target_command(args)
+        elif args.command == "init":
+            run_init_command(args)
+        elif args.command == "config":
+            run_config_command(args)
+        elif args.command == "status":
+            run_status_command(args)
+        elif args.command == "sync":
+            run_sync_command(args)
+        else:
+            parser.print_help()
+    except SystemExit:
+        raise
+    except Exception as e:
+        print(f"{parser.prog}: error: {e}", file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

@@ -1,73 +1,50 @@
 # sync-worktree
 
-Config-driven file sync between Git worktrees. Single file, zero dependencies, AI-native.
+Config-driven file sync between Git worktrees. Single file, zero dependencies.
 
 ## Why
 
-AI agents (Claude Code, Cursor, Copilot) work in git repos but can't safely publish subsets of files to production branches. Manual `cp`, `rsync`, or `git checkout` breaks state tracking, skips safety checks, and doesn't compose with config.
+AI agents can use this to publish subsets of a repo without memorizing git incantations.
 
-sync-worktree solves this: one JSON config, one command, deterministic pipeline. The agent runs `--help`, follows the workflow, and handles the entire bare-repo lifecycle without memorizing git incantations.
+Architecture reference: [docs/architecture.md](docs/architecture.md)
 
 ## For AI Agents
 
-`--help` is the complete interface contract. Every operation the agent needs is a flag:
+`--help` is the contract. Use it first.
 
 ```
 python3 sync_worktree.py --help
 ```
 
-The workflow section in `--help` covers the full lifecycle:
-- Phase 0: repo setup (`--init-bare`, `--add-target`, `--migrate`)
-- Phase 1-4: config → preview → execute → verify
-- CI mode: `--strict --json` for structured output
-
-Schema reference: `--help-config`. Machine output: `--json`. State query: `--status`.
-
-No implicit behavior. Dry-run by default. `--apply` requires prior dry-run unless `--force`.
-
-## Workflow
+Minimal flow:
 
 ```bash
-# 0. New project from remote
-sync_worktree.py --init-bare <url>
+# setup
+sync_worktree.py init-bare <url>
 cd master
-sync_worktree.py --add-target release
+sync_worktree.py add-target release
 
-# 1. Configure
-sync_worktree.py --init              # auto-detect worktrees, create config
-sync_worktree.py --help-config       # config schema reference
-sync_worktree.py --config            # verify resolved config
+# config
+sync_worktree.py init
+sync_worktree.py help-config
+sync_worktree.py config
 
-# 2. Preview
-sync_worktree.py release             # dry-run
-sync_worktree.py release -v          # include unchanged/excluded/protected
-sync_worktree.py release --diff      # file content diffs
+# preview
+sync_worktree.py sync release
+sync_worktree.py sync release -v
+sync_worktree.py sync release --diff
 
-# 3. Execute
-sync_worktree.py release --apply     # sync (requires prior dry-run)
+# apply
+sync_worktree.py sync release --apply
 
-# 4. Verify
-sync_worktree.py --status            # last sync state
+# verify
+sync_worktree.py status
 ```
-
-## Structure
-
-```
-project/
-  .bare/                          bare repo (git objects only)
-  .bare/sync-worktree.json       sync config (not tracked)
-  .bare/sync-worktree.state.json sync state (auto-generated)
-  .git                            gitdir: ./.bare
-  master/                         development (all files, edit here)
-  release/                        publish (exclude tests/plan)
-  runner/                         production (include runtime only)
-```
-
-Targets start as empty orphan branches. All edits happen in master/. sync-worktree copies the configured subset out.
 
 ## Config
 
-`.bare/sync-worktree.json` — pipeline: `include` → `exclude` → `.git/`
+`.bare/sync-worktree.json`
+New targets default-exclude only `.gitignore`.
 
 ```json
 {
@@ -81,7 +58,7 @@ Targets start as empty orphan branches. All edits happen in master/. sync-worktr
     "runner": {
       "source": "master",
       "include": ["lib/**/*.mjs", "package.json"],
-      "protect": ["node_modules/"],
+      "exclude": [".gitignore"],
       "delete_policy": "unlisted",
       "post_sync": "pm2 restart app"
     }
@@ -89,18 +66,7 @@ Targets start as empty orphan branches. All edits happen in master/. sync-worktr
 }
 ```
 
-Full schema: `sync_worktree.py --help-config`
-
-## Safety
-
-| Layer | Mechanism |
-|-------|-----------|
-| Dry-run gate | `--apply` blocked without prior dry-run |
-| 8 cross-checks | C1-C8: dirty source, staged conflicts, target drift, stale patterns |
-| Protect patterns | Never delete `node_modules/`, `.env`, target-only files |
-| State hashes | SHA-256 per file, detect target tampering (C6) |
-| Strict mode | `--strict` exits 2 on any warning, for CI |
-| Logging | Every run logged to `logs/<topology>-<target>-<datetime>.log` |
+Full schema: `sync_worktree.py help-config`
 
 ## Status Codes
 
