@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-04-20
+
+### Breaking Changes
+
+- CLI restructured: noun+verb subcommands replace flat commands
+  - `init-bare <url>` → `init <path> --bare` or `init <path> --url <url>`
+  - `help-config` → `config schema`
+  - `add-target <name>` → `target add <name>`
+  - `remove-target <name>` → `target remove <name>`
+  - `config` → `config show`
+  - `sync <target...>` → `sync --target <name>...`
+
+### Added
+
+- Context resolution: auto-detects source/target/project role from cwd
+- `-C PATH` global flag: run from anywhere without cd
+- `--source` / `--target` explicit selectors on sync and status
+- `init` command: create bare+worktree projects (local or clone)
+- `migrate` command: convert existing repo to bare+worktree layout
+- Workflow-driven `--help` with full usage examples
+- `target add --delete-policy` validates choices
+
+### Changed
+
+- All commands resolve direction via context model (source/target/project)
+- Help text describes behavior and workflow, not just flag names
+
 ## [0.4.5] - 2026-04-19
 
 ### Changed

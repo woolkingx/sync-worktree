@@ -3,15 +3,14 @@
 sync_worktree.py - Worktree sync.
 
 Usage:
-    sync-worktree help-config
-    sync-worktree init-bare <url>
-    sync-worktree migrate
-    sync-worktree init
-    sync-worktree config
-    sync-worktree status
-    sync-worktree add-target <name>
-    sync-worktree remove-target <name>
-    sync-worktree sync [target...] [--apply] [--strict] [--force] [--diff] [-v] [-q]
+    sync-worktree [-C <path>] init <path> [--bare] [--url <url>] [--branch <name>]
+    sync-worktree [-C <path>] migrate [<path>] [--dry-run]
+    sync-worktree [-C <path>] target add <name> [--source <wt>]
+    sync-worktree [-C <path>] target remove <name>
+    sync-worktree [-C <path>] target list
+    sync-worktree [-C <path>] config show|schema|init
+    sync-worktree [-C <path>] status [--source <wt>] [--target <name>...]
+    sync-worktree [-C <path>] sync [--source <wt>] [--target <name>...] [--apply] [-v] [-q]
 
 Run either as the console script `sync-worktree` or directly with
 `python3 sync_worktree.py`.
@@ -42,7 +41,7 @@ try:
 except ImportError:  # pragma: no cover - non-POSIX fallback
     fcntl = None
 
-__version__ = "0.4.5"
+__version__ = "0.5.0"
 
 
 class HelpOnErrorParser(argparse.ArgumentParser):
@@ -73,38 +72,40 @@ def git_try(*args, cwd=None, timeout=30) -> Tuple[bool, str]:
     return result.returncode == 0, result.stdout.strip()
 
 
-def git_detect_topology() -> Tuple[str, Path, Path]:
+def git_detect_topology(cwd=None) -> Tuple[str, Path, Path]:
     """Detect git topology and return (topology, git_internal_dir, cwd_worktree_path).
 
     topology: 'bare' | 'worktree' | 'repo'
     git_internal_dir: Path to store config (.bare/, .git/, or git common dir)
     """
     try:
-        git_common = Path(git_run("rev-parse", "--git-common-dir")).resolve()
-        git_dir = Path(git_run("rev-parse", "--git-dir")).resolve()
+        effective_base = Path(cwd).resolve() if cwd else Path.cwd().resolve()
+        raw_common = git_run("rev-parse", "--git-common-dir", cwd=cwd)
+        raw_dir = git_run("rev-parse", "--git-dir", cwd=cwd)
+        git_common = (effective_base / raw_common).resolve()
+        git_dir = (effective_base / raw_dir).resolve()
     except RuntimeError:
         print("Error: not inside a git repository", file=sys.stderr)
         sys.exit(1)
 
     # Bare repo: git_common usually ends with .bare or is the bare dir itself
-    is_bare_ok, is_bare = git_try("rev-parse", "--is-bare-repository")
+    is_bare_ok, is_bare = git_try("rev-parse", "--is-bare-repository", cwd=cwd)
     if is_bare == "true":
-        return "bare", git_common, Path.cwd().resolve()
+        return "bare", git_common, effective_base
 
     # Check for worktrees
     worktrees = git_parse_worktrees(git_common)
     if len(worktrees) > 1:
         # Find which worktree we're in
-        cwd = Path.cwd().resolve()
         for wt in worktrees:
             try:
-                cwd.relative_to(wt["path"])
+                effective_base.relative_to(wt["path"])
                 return "worktree" if git_common != git_dir else "bare", git_common, wt["path"]
             except ValueError:
                 continue
-        return "bare" if str(git_common).endswith(".bare") else "worktree", git_common, cwd
+        return "bare" if str(git_common).endswith(".bare") else "worktree", git_common, effective_base
 
-    return "repo", git_common, Path.cwd().resolve()
+    return "repo", git_common, effective_base
 
 
 def git_parse_worktrees(git_common) -> List[Dict[str, Any]]:
@@ -171,7 +172,7 @@ def git_create_worktree(project_root, name) -> Path:
 def git_setup_orphan(name, wt_path) -> None:
     """Create orphan branch in worktree with empty initial commit."""
     git_run("checkout", "--orphan", name, cwd=wt_path)
-    git_run("rm", "-rf", ".", cwd=wt_path)
+    git_try("rm", "-rf", ".", cwd=wt_path)  # May fail if worktree is already empty
     result = subprocess.run(
         ["git", "-c", "user.email=init@local", "-c", "user.name=init",
          "commit", "--allow-empty", "-m", "init: empty orphan for sync"],
@@ -1282,7 +1283,7 @@ def sync_target(config, target_name, git_internal, topology, cwd_worktree,
 
 def cmd_add_target(name, git_internal, topology) -> None:
     """Create empty orphan worktree and add to config."""
-    project_root = git_internal.parent if topology == "bare" else Path.cwd().resolve()
+    project_root = git_internal.parent
     logging.info(f"Adding target: {name}")
 
     worktrees = git_parse_worktrees(git_internal)
@@ -1317,7 +1318,7 @@ def cmd_add_target(name, git_internal, topology) -> None:
 
 def cmd_remove_target(name, git_internal, topology) -> None:
     """Remove worktree, branch, config entry, and state."""
-    project_root = git_internal.parent if topology == "bare" else Path.cwd().resolve()
+    project_root = git_internal.parent
     wt_path = git_resolve_worktree(name, git_internal)
 
     # Remove worktree
@@ -1350,38 +1351,198 @@ def cmd_remove_target(name, git_internal, topology) -> None:
 
 # == CLI Block ================================================================
 
-def init_bare(url) -> None:
-    """Clone remote as bare repo + set up worktree structure."""
-    cwd = Path.cwd()
+
+@dataclass
+class Context:
+    """Resolved execution context."""
+    role: str               # 'source' | 'target' | 'project'
+    project_root: Path      # project root (parent of .bare/)
+    git_internal: Path      # .bare/ path
+    source_name: str        # source worktree name
+    source_path: Path       # source worktree path
+    target_names: List[str] # resolved target list
+    topology: str           # 'bare' | 'worktree' | 'repo'
+    cwd_worktree: Path      # worktree containing cwd
+
+
+def resolve_project_root(start: Path) -> Optional[Path]:
+    """Find project root by searching upward for .bare/ directory."""
+    p = start.resolve()
+    while True:
+        if (p / ".bare").is_dir():
+            return p
+        parent = p.parent
+        if parent == p:
+            return None
+        p = parent
+
+
+def resolve_context(c_path: Optional[str], source_flag: Optional[str],
+                    target_flags: Optional[List[str]]) -> Context:
+    """Resolve execution context from flags and cwd."""
+    # Step 1: determine start path
+    start = Path(c_path).resolve() if c_path else Path.cwd().resolve()
+
+    # Step 2: find project root
+    project_root = resolve_project_root(start)
+    if project_root is None:
+        print("Error: not inside a sync-worktree project (no .bare/ found)", file=sys.stderr)
+        sys.exit(1)
+
+    git_internal = project_root / ".bare"
+
+    # Step 3: detect topology and worktrees
+    topology, _, _ = git_detect_topology(cwd=str(start))
+    worktrees = git_parse_worktrees(git_internal)
+
+    # Step 4: read config to determine source/target roles
+    config, _ = config_read(git_internal)
+    configured_targets = list(config.get("targets", {}).keys()) if config else []
+
+    # Step 5: determine which worktree cwd is in
+    cwd_worktree = start
+    cwd_branch = None
+    for wt in worktrees:
+        try:
+            start.relative_to(wt["path"])
+            cwd_worktree = wt["path"]
+            cwd_branch = wt.get("branch")
+            break
+        except ValueError:
+            continue
+
+    # Step 6: determine role
+    # Source worktrees are those referenced as "source" in config targets
+    source_names = set()
+    if config:
+        for t_cfg in config.get("targets", {}).values():
+            source_names.add(t_cfg.get("source", "master"))
+    if not source_names:
+        source_names.add("master")
+
+    if source_flag:
+        role = "source"
+        source_name = source_flag
+    elif cwd_branch in configured_targets:
+        role = "target"
+        source_name = config["targets"][cwd_branch].get("source", "master") if config else "master"
+    elif cwd_branch in source_names:
+        role = "source"
+        source_name = cwd_branch
+    else:
+        role = "project"
+        source_name = next(iter(source_names))
+
+    # Step 7: resolve source path
+    source_path = git_resolve_worktree(source_name, git_internal)
+    if source_path is None:
+        source_path = project_root / source_name
+
+    # Step 8: resolve targets
+    if target_flags:
+        target_names = target_flags
+    elif role == "source":
+        target_names = configured_targets
+    elif role == "target":
+        target_names = [cwd_branch] if cwd_branch else []
+    else:
+        target_names = []
+
+    return Context(
+        role=role,
+        project_root=project_root,
+        git_internal=git_internal,
+        source_name=source_name,
+        source_path=source_path,
+        target_names=target_names,
+        topology=topology,
+        cwd_worktree=cwd_worktree,
+    )
+
+
+def print_context_header(ctx: Context, mode: str = "dry-run", quiet: bool = False) -> None:
+    """Print resolved direction header."""
+    if quiet:
+        return
+    print(f"Context: source={ctx.source_name}")
+    print(f"Targets: {', '.join(ctx.target_names) if ctx.target_names else '(none)'}")
+    print(f"Mode: {mode}")
+    print(f"Role: {ctx.role}")
+
+
+# -- init command -------------------------------------------------------------
+
+def cmd_init(path: str, url: Optional[str] = None, bare: bool = False,
+             branch: Optional[str] = None) -> None:
+    """Initialize a new sync-worktree project."""
+    cwd = Path(path).resolve()
+    cwd.mkdir(parents=True, exist_ok=True)
     bare_dir = cwd / ".bare"
 
     if bare_dir.exists():
         print(f"Error: .bare/ already exists in {cwd}", file=sys.stderr)
         sys.exit(1)
 
-    try:
-        git_run("clone", "--bare", url, str(bare_dir))
-        logging.info(f"Cloned bare repo to .bare/")
-    except RuntimeError as e:
-        print(f"Error: Failed to clone: {e}", file=sys.stderr)
+    if url:
+        # Clone from remote
+        try:
+            git_run("clone", "--bare", url, str(bare_dir))
+            logging.info("Cloned bare repo to .bare/")
+        except RuntimeError as e:
+            print(f"Error: Failed to clone: {e}", file=sys.stderr)
+            sys.exit(1)
+    elif bare:
+        # Local init
+        try:
+            git_run("init", "--bare", str(bare_dir))
+            logging.info("Initialized bare repo at .bare/")
+        except RuntimeError as e:
+            print(f"Error: Failed to init: {e}", file=sys.stderr)
+            sys.exit(1)
+        # Seed empty commit so worktree add works
+        try:
+            tree = git_run("hash-object", "-t", "tree", "/dev/null", cwd=bare_dir).strip()
+            commit_hash = git_run("commit-tree", tree, "-m", "init", cwd=bare_dir).strip()
+            branch_name = branch or "master"
+            git_run("update-ref", f"refs/heads/{branch_name}", commit_hash, cwd=bare_dir)
+            logging.info(f"Seeded {branch_name} with empty commit")
+        except RuntimeError as e:
+            print(f"Error: Failed to seed repo: {e}", file=sys.stderr)
+            sys.exit(1)
+    else:
+        print("Error: specify --url <url> or --bare for local init", file=sys.stderr)
         sys.exit(1)
 
     git_write_pointer(cwd)
 
+    # Determine branch name
+    if branch:
+        branch_name = branch
+    elif url:
+        # Read HEAD from cloned bare
+        ok, head_ref = git_try("symbolic-ref", "HEAD", cwd=bare_dir)
+        if ok and head_ref.startswith("refs/heads/"):
+            branch_name = head_ref.removeprefix("refs/heads/")
+        else:
+            branch_name = "master"
+    else:
+        branch_name = branch or "master"
+
     try:
-        git_run("worktree", "add", "master", "master")
-        logging.info("Created master worktree")
+        git_run("worktree", "add", branch_name, branch_name, cwd=cwd)
+        logging.info(f"Created source worktree: {branch_name}")
     except RuntimeError as e:
-        print(f"Error: Failed to create master worktree: {e}", file=sys.stderr)
+        print(f"Error: Failed to create worktree: {e}", file=sys.stderr)
         sys.exit(1)
 
-    print(f"\nInitialized bare repo + master worktree")
-    print(f"  Directory: {cwd}")
-    print(f"  Bare repo: {bare_dir}")
-    print(f"  Worktree: {cwd / 'master'}")
-    print(f"\nNext: cd master && git config user.email/user.name")
-    print(f"      {Path(__file__).name} add-target release")
+    print(f"\nInitialized sync-worktree project")
+    print(f"  Project: {cwd}")
+    print(f"  Source:  {cwd / branch_name}")
+    print(f"\nNext: cd {cwd / branch_name}")
+    print(f"      sync-worktree target add release")
 
+
+# -- migrate command ----------------------------------------------------------
 
 def _finalize_migration(cwd, bare_dir, current_branch) -> Path:
     """Complete post-migration setup: config, prune, worktree."""
@@ -1402,13 +1563,13 @@ def _finalize_migration(cwd, bare_dir, current_branch) -> Path:
     return wt_path
 
 
-def migrate_to_bare() -> None:
+def cmd_migrate(path: Optional[str] = None, dry_run: bool = False) -> None:
     """Convert existing regular repo to bare + worktree structure."""
-    cwd = Path.cwd().resolve()
+    cwd = Path(path).resolve() if path else Path.cwd().resolve()
     git_dir = cwd / ".git"
 
     if not git_dir.exists() or not git_dir.is_dir():
-        print(f"Error: Not in a git repository (no .git/ directory)", file=sys.stderr)
+        print(f"Error: Not a git repository: {cwd}", file=sys.stderr)
         sys.exit(1)
 
     try:
@@ -1418,15 +1579,21 @@ def migrate_to_bare() -> None:
         sys.exit(1)
 
     if current_branch == "HEAD":
-        print(f"Error: Detached HEAD. Checkout a branch first.", file=sys.stderr)
+        print("Error: Detached HEAD. Checkout a branch first.", file=sys.stderr)
         sys.exit(1)
-
-    logging.info(f"Migrating repo to bare + worktree (branch: {current_branch})")
 
     bare_dir = cwd / ".bare"
     if bare_dir.exists():
-        print(f"Error: .bare/ already exists", file=sys.stderr)
+        print("Error: .bare/ already exists", file=sys.stderr)
         sys.exit(1)
+
+    if dry_run:
+        print(f"Would migrate: {cwd}")
+        print(f"  .git/ → .bare/")
+        print(f"  Source worktree: {cwd / current_branch}")
+        return
+
+    logging.info(f"Migrating repo to bare + worktree (branch: {current_branch})")
 
     try:
         git_dir.rename(bare_dir)
@@ -1438,104 +1605,266 @@ def migrate_to_bare() -> None:
     git_write_pointer(cwd)
     wt_path = _finalize_migration(cwd, bare_dir, current_branch)
 
-    print(f"\nMigrated to bare repo + worktree structure")
-    print(f"  Bare repo: {bare_dir}")
-    print(f"  Worktree: {wt_path} ({current_branch})")
-    print(f"\nNext: cd {current_branch} && work normally")
-    print(f"      {Path(__file__).name} init")
+    print(f"\nMigrated to sync-worktree project")
+    print(f"  Source: {wt_path} ({current_branch})")
+    print(f"\nNext: cd {current_branch}")
+    print(f"      sync-worktree target add release")
 
+
+# -- CLI parser ---------------------------------------------------------------
 
 def build_cli_parser() -> argparse.ArgumentParser:
-    epilog = "Dry-run by default. Use `sync --apply` to execute."
+    epilog = """\
+workflow (run from source worktree, or use -C PATH from anywhere):
+
+  1. Create project
+     %(prog)s init <path> --bare              Local empty repo
+     %(prog)s init <path> --url <url>         Clone from remote
+                          [--branch <name>]   Source branch (default: main)
+
+  2. Add targets
+     %(prog)s target add <name>               Create target worktree + config
+                   [--exclude <pat>...]        Patterns to skip (gitignore-style)
+                   [--include <pat>...]        Override excludes
+                   [--protect <pat>...]        Never delete in target
+                   [--delete-policy never|unlisted|tracked_only]
+
+  3. Preview sync (dry-run, always safe)
+     %(prog)s sync                            All targets
+     %(prog)s sync --target <name>...         Specific targets
+                   [--source <worktree>]      Explicit source
+                   [--diff]                   Show file diffs
+                   [--strict]                 Warnings → exit 2
+                   [-v | -q]
+
+  4. Apply sync (writes files)
+     %(prog)s sync --apply                    All targets
+     %(prog)s sync --target <name> --apply    Specific target
+                   [--force]                  Skip pre-sync checks
+
+  5. Inspect
+     %(prog)s status [--target <name>...]     Source vs target diff summary
+     %(prog)s config show                     Resolved config
+     %(prog)s target list                     All registered targets
+
+  Run from anywhere:
+     %(prog)s -C ~/projects/myapp/master sync --apply
+
+  Subcommand details: %(prog)s <command> --help
+"""
     common = argparse.ArgumentParser(add_help=False)
-    common.add_argument("--log-dir", default=None, help="Override log directory (default: script_dir/logs/)")
+    common.add_argument("--log-dir", default=None, help="Log directory")
     common.add_argument("--no-log", action="store_true", help="Disable file logging")
+    common.add_argument("--json", action="store_true", help="Machine-readable output")
 
     parser = HelpOnErrorParser(
-        description="Git-style worktree sync.",
+        description="Source → target worktree sync. Dry-run by default.",
         epilog=epilog,
         formatter_class=argparse.RawDescriptionHelpFormatter,
         parents=[common],
     )
+    parser.add_argument("-C", dest="c_path", default=None, metavar="PATH",
+                       help="Run as if invoked from PATH (resolves source/target context)")
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
 
     sub = parser.add_subparsers(dest="command", required=True)
 
-    p = sub.add_parser("help-config", help="Schema", parents=[common])
-    p.set_defaults(command="help-config")
-
-    p = sub.add_parser("init-bare", help="Bare init", parents=[common])
-    p.add_argument("url")
-    p.set_defaults(command="init-bare")
-
-    p = sub.add_parser("migrate", help="Migrate repo", parents=[common])
-    p.set_defaults(command="migrate")
-
-    p = sub.add_parser("add-target", help="Add target", parents=[common])
-    p.add_argument("name")
-    p.set_defaults(command="add-target")
-
-    p = sub.add_parser("remove-target", help="Remove target", parents=[common])
-    p.add_argument("name")
-    p.set_defaults(command="remove-target")
-
-    p = sub.add_parser("init", help="Init config", parents=[common])
+    # init
+    p = sub.add_parser("init", help="Initialize project", parents=[common],
+                       description="Create a new bare+worktree project layout.",
+                       epilog="Use --bare for local-only, --url to clone from remote.",
+                       formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("path", help="Project root directory (created if absent)")
+    p.add_argument("--bare", action="store_true", help="Local init without remote (creates empty repo)")
+    p.add_argument("--url", default=None, help="Clone bare repo from this remote URL")
+    p.add_argument("--branch", default=None, help="Source branch name (default: main)")
     p.set_defaults(command="init")
 
-    p = sub.add_parser("config", help="Show config", parents=[common])
-    p.set_defaults(command="config")
+    # migrate
+    p = sub.add_parser("migrate", help="Convert repo to bare+worktree", parents=[common])
+    p.add_argument("path", nargs="?", default=None, help="Repo path (default: cwd)")
+    p.add_argument("--dry-run", action="store_true", help="Preview only")
+    p.add_argument("--source", default=None, help="Source worktree name")
+    p.set_defaults(command="migrate")
 
-    p = sub.add_parser("status", help="Show status", parents=[common])
+    # target (with sub-subcommands)
+    p_target = sub.add_parser("target", help="Manage targets", parents=[common])
+    target_sub = p_target.add_subparsers(dest="target_command", required=True)
+
+    p = target_sub.add_parser("add", help="Add target worktree", parents=[common],
+                              description="Create a new target worktree and register it in config.",
+                              epilog="After adding, use `sync --target <name>` to preview, then `--apply` to populate.",
+                              formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("name", help="Target worktree name (becomes directory name)")
+    p.add_argument("--source", default=None, help="Source worktree (default: auto from context)")
+    p.add_argument("--exclude", nargs="*", default=None, help="Gitignore-style patterns to exclude from sync")
+    p.add_argument("--include", nargs="*", default=None, help="Gitignore-style patterns to include (overrides exclude)")
+    p.add_argument("--protect", nargs="*", default=None, help="Patterns for target files that should never be deleted")
+    p.add_argument("--delete-policy", default=None, choices=["never", "unlisted", "tracked_only"],
+                   help="When to delete target files (default: never)")
+    p.set_defaults(target_command="add")
+
+    p = target_sub.add_parser("remove", help="Remove target", parents=[common])
+    p.add_argument("name", help="Target name")
+    p.add_argument("--source", default=None, help="Source worktree")
+    p.set_defaults(target_command="remove")
+
+    p = target_sub.add_parser("list", help="List targets", parents=[common])
+    p.add_argument("--source", default=None, help="Source worktree")
+    p.set_defaults(target_command="list")
+
+    p_target.set_defaults(command="target")
+
+    # config (with sub-subcommands)
+    p_config = sub.add_parser("config", help="Configuration", parents=[common])
+    config_sub = p_config.add_subparsers(dest="config_command", required=True)
+
+    p = config_sub.add_parser("show", help="Show config", parents=[common])
+    p.add_argument("--source", default=None, help="Source worktree")
+    p.add_argument("--target", nargs="*", default=None, help="Target filter")
+    p.set_defaults(config_command="show")
+
+    p = config_sub.add_parser("schema", help="Show config schema", parents=[common])
+    p.set_defaults(config_command="schema")
+
+    p = config_sub.add_parser("init", help="Create default config", parents=[common])
+    p.set_defaults(config_command="init")
+
+    p_config.set_defaults(command="config")
+
+    # status
+    p = sub.add_parser("status", help="Show sync status", parents=[common])
+    p.add_argument("--source", default=None, help="Source worktree")
+    p.add_argument("--target", nargs="*", default=None, help="Target filter")
     p.set_defaults(command="status")
 
-    p = sub.add_parser("sync", help="Sync target(s)", parents=[common])
-    p.add_argument("targets", nargs="*", default=[])
-    p.add_argument("--apply", action="store_true", help="Apply")
-    p.add_argument("--strict", action="store_true", help="Warn->error")
-    p.add_argument("--force", action="store_true", help="Override checks")
-    p.add_argument("--diff", action="store_true", help="Show diffs")
-    p.add_argument("-v", "--verbose", action="store_true", help="Verbose")
-    p.add_argument("-q", "--quiet", action="store_true", help="Quiet")
+    # sync
+    p = sub.add_parser("sync", help="Sync source → target(s)", parents=[common],
+                       description="Compare source and target(s), preview changes (dry-run), or apply.",
+                       epilog="Dry-run by default. Add --apply to write files.",
+                       formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--source", default=None, help="Source worktree (default: auto from context)")
+    p.add_argument("--target", nargs="*", default=None,
+                   help="Target(s) to sync (default: all targets in source context, self in target context)")
+    p.add_argument("--apply", action="store_true", help="Write changes to disk (without this, only previews)")
+    p.add_argument("--strict", action="store_true", help="Treat warnings as errors (exit 2)")
+    p.add_argument("--force", action="store_true", help="Skip pre-sync checks (uncommitted changes, etc.)")
+    p.add_argument("--diff", action="store_true", help="Show file-level diffs in output")
+    p.add_argument("-v", "--verbose", action="store_true", help="Verbose output")
+    p.add_argument("-q", "--quiet", action="store_true", help="Quiet output")
     p.set_defaults(command="sync")
 
     return parser
 
 
-def run_sync_command(args) -> None:
-    topology, git_internal, cwd_worktree = git_detect_topology()
+# -- Command runners ----------------------------------------------------------
 
-    config, config_errors = config_read(git_internal)
+def run_init(args) -> None:
+    setup_logging("init", [], log_dir=args.log_dir, no_log=args.no_log,
+                  scope_label=Path(args.path).name)
+    cmd_init(args.path, url=args.url, bare=args.bare, branch=args.branch)
+
+
+def run_migrate(args) -> None:
+    path = args.path or str(Path.cwd())
+    setup_logging("migrate", [], log_dir=args.log_dir, no_log=args.no_log,
+                  scope_label=Path(path).name)
+    cmd_migrate(path=args.path, dry_run=args.dry_run)
+
+
+def run_target(args) -> None:
+    ctx = resolve_context(args.c_path, getattr(args, "source", None), None)
+    setup_logging(
+        ctx.topology, [getattr(args, "name", "")],
+        log_dir=args.log_dir, no_log=args.no_log,
+        scope_label=_get_scope_label(ctx.topology, ctx.git_internal, ctx.cwd_worktree),
+    )
+
+    if ctx.role == "target" and not getattr(args, "source", None):
+        print("Error: cannot manage targets from a target worktree (use --source)", file=sys.stderr)
+        sys.exit(1)
+
+    if args.target_command == "add":
+        cmd_add_target(args.name, ctx.git_internal, ctx.topology)
+    elif args.target_command == "remove":
+        cmd_remove_target(args.name, ctx.git_internal, ctx.topology)
+    elif args.target_command == "list":
+        config, _ = config_read(ctx.git_internal)
+        if config:
+            print(f"Source: {ctx.source_name}")
+            targets = config.get("targets", {})
+            for name, t_cfg in targets.items():
+                print(f"  → {name} (source={t_cfg.get('source', 'master')})")
+            if not targets:
+                print("  (no targets configured)")
+        else:
+            print("Error: no config found", file=sys.stderr)
+            sys.exit(1)
+
+
+def run_config(args) -> None:
+    if args.config_command == "schema":
+        report_config_schema()
+        return
+
+    ctx = resolve_context(args.c_path, getattr(args, "source", None), None)
+    setup_logging(
+        ctx.topology, [],
+        log_dir=args.log_dir, no_log=args.no_log,
+        scope_label=_get_scope_label(ctx.topology, ctx.git_internal, ctx.cwd_worktree),
+    )
+
+    if args.config_command == "show":
+        config, config_errors = config_read(ctx.git_internal)
+        if config is None:
+            for e in config_errors:
+                print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+        report_config(config)
+    elif args.config_command == "init":
+        config_init(ctx.git_internal, ctx.git_internal)
+
+
+def run_status(args) -> None:
+    ctx = resolve_context(args.c_path, args.source, getattr(args, "target", None))
+    setup_logging(
+        ctx.topology, [],
+        log_dir=args.log_dir, no_log=args.no_log,
+        scope_label=_get_scope_label(ctx.topology, ctx.git_internal, ctx.cwd_worktree),
+    )
+    print_context_header(ctx)
+    state = state_read(ctx.git_internal)
+    report_status(state)
+
+
+def run_sync(args) -> None:
+    ctx = resolve_context(args.c_path, args.source, getattr(args, "target", None))
+
+    config, config_errors = config_read(ctx.git_internal)
     if config is None:
         for e in config_errors:
             print(f"Error: {e}", file=sys.stderr)
-        print(f"\nRun with 'sync-worktree init' to create default config.", file=sys.stderr)
+        print(f"\nRun: sync-worktree config init", file=sys.stderr)
         sys.exit(1)
 
-    target_names = args.targets or list(config.get("targets", {}).keys())
+    target_names = ctx.target_names or list(config.get("targets", {}).keys())
     setup_logging(
-        topology,
-        target_names,
-        log_dir=args.log_dir,
-        no_log=args.no_log,
-        scope_label=_get_scope_label(topology, git_internal, cwd_worktree),
+        ctx.topology, target_names,
+        log_dir=args.log_dir, no_log=args.no_log,
+        scope_label=_get_scope_label(ctx.topology, ctx.git_internal, ctx.cwd_worktree),
     )
 
+    mode = "apply" if args.apply else "dry-run"
     if not args.quiet:
-        print(f"Topology: {topology}")
-        print(f"Config: {config_path(git_internal)}")
+        print_context_header(ctx, mode=mode)
 
-    logging.info(f"Starting sync: mode={'apply' if args.apply else 'dry-run'}")
+    logging.info(f"Starting sync: mode={mode}")
 
     if not target_names:
-        print("No targets defined in config.", file=sys.stderr)
+        print("Error: no targets to sync", file=sys.stderr)
         sys.exit(1)
 
-    if not args.quiet:
-        run_mode = "APPLY" if args.apply else "DRY RUN"
-        print(f"Mode: {run_mode}")
-        print(f"Targets: {', '.join(target_names)}")
-
-    if args.apply and not state_check_gate(git_internal, args.apply, args.force):
+    if args.apply and not state_check_gate(ctx.git_internal, args.apply, args.force):
         sys.exit(1)
 
     all_ok = True
@@ -1546,7 +1875,7 @@ def run_sync_command(args) -> None:
 
     for name in target_names:
         ok, has_warn, actions = sync_target(
-            config, name, git_internal, topology, cwd_worktree,
+            config, name, ctx.git_internal, ctx.topology, ctx.cwd_worktree,
             apply=args.apply, strict=args.strict, force=args.force,
             verbose=args.verbose, show_diff=args.diff,
         )
@@ -1559,9 +1888,8 @@ def run_sync_command(args) -> None:
         if actions:
             all_actions[name] = actions
 
-    mode = "apply" if args.apply else "dry-run"
     checks_passed = all_ok and (not args.strict or not any_warnings)
-    state_save_run(git_internal, target_names, mode, checks_passed,
+    state_save_run(ctx.git_internal, target_names, mode, checks_passed,
                    total_warnings, total_errors, all_actions)
 
     logging.info(f"Sync complete: ok={all_ok}, warnings={total_warnings}, errors={total_errors}")
@@ -1572,92 +1900,7 @@ def run_sync_command(args) -> None:
         sys.exit(2)
 
 
-def run_config_command(args) -> None:
-    topology, git_internal, cwd_worktree = git_detect_topology()
-    config, config_errors = config_read(git_internal)
-    if config is None:
-        for e in config_errors:
-            print(f"Error: {e}", file=sys.stderr)
-            sys.exit(1)
-    setup_logging(
-        topology,
-        list(config.get("targets", {}).keys()),
-        log_dir=args.log_dir,
-        no_log=args.no_log,
-        scope_label=_get_scope_label(topology, git_internal, cwd_worktree),
-    )
-    report_config(config)
-
-
-def run_status_command(args) -> None:
-    topology, git_internal, cwd_worktree = git_detect_topology()
-    state = state_read(git_internal)
-    setup_logging(
-        topology,
-        [],
-        log_dir=args.log_dir,
-        no_log=args.no_log,
-        scope_label=_get_scope_label(topology, git_internal, cwd_worktree),
-    )
-    report_status(state)
-
-
-def run_init_command(args) -> None:
-    topology, git_internal, cwd_worktree = git_detect_topology()
-    setup_logging(
-        topology,
-        [],
-        log_dir=args.log_dir,
-        no_log=args.no_log,
-        scope_label=_get_scope_label(topology, git_internal, cwd_worktree),
-    )
-    config_init(git_internal, git_internal)
-
-
-def run_help_config_command(_args) -> None:
-    report_config_schema()
-
-
-def run_init_bare_command(args) -> None:
-    cwd = Path.cwd().resolve()
-    setup_logging("init-bare", [], log_dir=args.log_dir, no_log=args.no_log, scope_label=cwd.name)
-    init_bare(args.url)
-
-
-def run_migrate_command(args) -> None:
-    try:
-        git_run("rev-parse", "--git-dir")
-    except RuntimeError:
-        print("Error: not inside a git repository", file=sys.stderr)
-        sys.exit(1)
-    cwd = Path.cwd().resolve()
-    setup_logging("migrate", [], log_dir=args.log_dir, no_log=args.no_log, scope_label=cwd.name)
-    migrate_to_bare()
-
-
-def run_add_target_command(args) -> None:
-    topology, git_internal, cwd_worktree = git_detect_topology()
-    setup_logging(
-        topology,
-        [args.name],
-        log_dir=args.log_dir,
-        no_log=args.no_log,
-        scope_label=_get_scope_label(topology, git_internal, cwd_worktree),
-    )
-    cmd_add_target(args.name, git_internal, topology)
-
-
-def run_remove_target_command(args) -> None:
-    topology, git_internal, cwd_worktree = git_detect_topology()
-    setup_logging(
-        topology,
-        [args.name],
-        log_dir=args.log_dir,
-        no_log=args.no_log,
-        scope_label=_get_scope_label(topology, git_internal, cwd_worktree),
-    )
-    cmd_remove_target(args.name, git_internal, topology)
-
+# -- Main dispatch ------------------------------------------------------------
 
 def main() -> None:
     parser = build_cli_parser()
@@ -1668,24 +1911,18 @@ def main() -> None:
 
         args = parser.parse_args()
 
-        if args.command == "help-config":
-            run_help_config_command(args)
-        elif args.command == "init-bare":
-            run_init_bare_command(args)
+        if args.command == "init":
+            run_init(args)
         elif args.command == "migrate":
-            run_migrate_command(args)
-        elif args.command == "add-target":
-            run_add_target_command(args)
-        elif args.command == "remove-target":
-            run_remove_target_command(args)
-        elif args.command == "init":
-            run_init_command(args)
+            run_migrate(args)
+        elif args.command == "target":
+            run_target(args)
         elif args.command == "config":
-            run_config_command(args)
+            run_config(args)
         elif args.command == "status":
-            run_status_command(args)
+            run_status(args)
         elif args.command == "sync":
-            run_sync_command(args)
+            run_sync(args)
         else:
             parser.print_help()
     except SystemExit:
