@@ -1,6 +1,6 @@
 [project]
 name = "sync-worktree"
-version = "0.5.0"
+version = "0.5.9"
 description = "Config-driven file sync between git worktrees"
 requires-python = ">=3.8"
 license = "MIT"
