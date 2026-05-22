@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>System Model - sync-worktree</title>
+  <link rel="stylesheet" href="handbook.css">
+</head>
+<body>
+<main>
+  <h1>System Model</h1>
+  <nav><a href="index.html">Index</a><a href="data-model.html">Data Model</a><a href="config.html">Config</a><a href="operations.html">Operations</a></nav>
+
+  <section>
+    <h2>Purpose</h2>
+    <p>sync-worktree gives an AI agent a short, usable Git decision report before it acts. It exists because agents can otherwise treat a bare repo, source worktree, release worktree, and runner worktree as one flat directory and then run the wrong Git operation in the wrong place.</p>
+    <p>The original pressure came from Claude-style Git drift: branch confusion, dirty target edits, accidental worktree mutation, and unclear release/runner boundaries. Codex is steadier, but bounded reports still matter because they reduce context size and make the next safe action explicit.</p>
+  </section>
+
+  <section>
+    <h2>Decision Support First</h2>
+    <p>The tool does not start from "copy all files" or "dump full repository context". It starts from "what short report helps the AI choose the next safe Git action?" A sync operation is only one possible workflow after report generation.</p>
+    <pre><code>project root
+  .bare/ or .git/
+  source worktree or bundle
+  target worktree
+  rule.config.json
+  setting.config.json
+
+AI operation
+  config -> git facts -> bounded report -> decide -> apply or abort
+
+sync decision path
+  source data -> target role -> candidate files -> actions -> policy -> apply</code></pre>
+  </section>
+
+  <section>
+    <h2>Owner Boundary</h2>
+    <table>
+      <thead><tr><th>unit</th><th>role</th><th>owned data</th><th>must not own</th></tr></thead>
+      <tbody>
+        <tr><td>Config</td><td>persistent owner</td><td>Targets, roles, policies, command style, personal/team preferences.</td><td>Runtime facts or execution evidence.</td></tr>
+        <tr><td>Report</td><td>persistent or emitted owner</td><td>Status, bounded summary, risks, recommendation, commands, workflow, evidence.</td><td>Team preferences or hidden config.</td></tr>
+        <tr><td>Git/topology</td><td>submodule transform</td><td>None; reads current facts.</td><td>Persistent product truth.</td></tr>
+        <tr><td>Planner/checker/advisor</td><td>submodule transform</td><td>None; converts config + facts into report fields.</td><td>Independent schema or durable state.</td></tr>
+        <tr><td>Executor</td><td>side-effect adapter</td><td>None; executes approved commands and returns evidence.</td><td>Decision or report truth.</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>Invariant</h2>
+    <p class="note">A target may be modified only after a report has made the status, risk, recommendation, commands, and workflow explicit. The report is the AI-facing decision surface; full Git traces are supporting evidence, not the default context.</p>
+  </section>
+</main>
+</body>
+</html>

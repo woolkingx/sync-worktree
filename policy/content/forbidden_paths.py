@@ -1,8 +1,5 @@
 """POL-CON-001: Forbidden path inclusion check."""
 
-from pathlib import Path
-from typing import List
-
 from policy.base import Policy, PolicyContext, PolicyResult, policy
 from core.filter import filter_match_batch
 

@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Policies - sync-worktree</title>
+  <link rel="stylesheet" href="handbook.css">
+</head>
+<body>
+<main>
+  <h1>Policies</h1>
+  <nav><a href="index.html">Index</a><a href="data-model.html">Data Model</a><a href="config.html">Config</a><a href="reporting.html">Reporting</a><a href="operations.html">Operations</a></nav>
+
+  <section>
+    <h2>Policy Position</h2>
+    <p>Policy is a config-driven checker submodule. It does not own durable data. It reads config and current transform facts, then projects risk/status/evidence into the report owner.</p>
+  </section>
+
+  <section>
+    <h2>Implemented Policies</h2>
+    <table>
+      <thead><tr><th>code</th><th>submodule</th><th>report projection</th></tr></thead>
+      <tbody>
+        <tr><td><code>POL-TOP-001</code></td><td><code>policy/topology/role.py</code></td><td>Blocked risk when operation is not allowed by target role.</td></tr>
+        <tr><td><code>POL-TOP-002</code></td><td><code>policy/topology/cleanliness.py</code></td><td>Blocked risk plus review/clean workflow when target worktree is dirty.</td></tr>
+        <tr><td><code>POL-CON-001</code></td><td><code>policy/content/forbidden_paths.py</code></td><td>Blocked risk plus filter/config recommendation when forbidden paths enter candidates.</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>Enablement</h2>
+    <p><code>RuleConfig.policies</code> enables or disables policy codes by exact code or wildcard. Target role overrides may replace enabled lists or add disabled policies. Policy enablement is config data; policy result is report data.</p>
+    <pre><code>{
+  "policies": {
+    "enabled": ["POL-TOP-*", "POL-CON-*", "POL-SEC-*"],
+    "disabled": []
+  }
+}</code></pre>
+  </section>
+
+  <section>
+    <h2>Boundary Rule</h2>
+    <p class="note">Do not add a new policy schema or durable policy state unless it is truly config. Policy code is transform logic from config + facts to report.risks, report.status, report.recommendation, and report.workflow.</p>
+  </section>
+</main>
+</body>
+</html>

@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Data Model - sync-worktree</title>
+  <link rel="stylesheet" href="handbook.css">
+</head>
+<body>
+<main>
+  <h1>Data Model</h1>
+  <nav><a href="index.html">Index</a><a href="system-model.html">System Model</a><a href="config.html">Config</a><a href="reporting.html">Reporting</a></nav>
+
+  <section>
+    <h2>Persistent Owners</h2>
+    <table>
+      <thead><tr><th>owner</th><th>data</th><th>meaning</th></tr></thead>
+      <tbody>
+        <tr><td><code>config</code></td><td>Targets, roles, filters, policy enablement, output budget, command style, workflow preferences.</td><td>What the user/team wants and how this user prefers Git actions to be suggested.</td></tr>
+        <tr><td><code>report</code></td><td>Status, reason, summary, risks, recommendation, commands, workflow, evidence, optional full trace pointer.</td><td>What the AI should read before deciding or acting.</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>Transient Transform Objects</h2>
+    <table>
+      <thead><tr><th>object</th><th>submodule</th><th>meaning</th><th>owner status</th></tr></thead>
+      <tbody>
+        <tr><td><code>TopologyContext</code></td><td><code>git/topology</code></td><td>Detected Git mode, root, internal dir, current worktree, branch.</td><td>Input fact, not persistent owner.</td></tr>
+        <tr><td><code>SyncPlan</code></td><td><code>planner</code></td><td>Candidate file actions for the sync workflow.</td><td>Intermediate PDU for a report section.</td></tr>
+        <tr><td><code>PolicyContext</code>, <code>ValidationSummary</code></td><td><code>checker</code></td><td>Config-driven pass/fail/risk projection.</td><td>Intermediate PDU for report.risks/status.</td></tr>
+        <tr><td><code>Decision</code>, <code>Result</code></td><td><code>executor</code></td><td>Optional execution request and returned evidence.</td><td>Execution boundary; report may reference them.</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>Report Shape</h2>
+    <pre><code>{
+  "status": "ready|blocked|warning|applied|failed",
+  "reason": "target_dirty|policy_block|ready_to_apply|...",
+  "summary": "short human-readable state",
+  "risks": [],
+  "recommendation": "one preferred next move",
+  "commands": [],
+  "workflow": [],
+  "evidence": {},
+  "full_trace": null
+}</code></pre>
+    <p>Report is bounded by config. If the report would grow past its budget, it must summarize and point to an explicit full trace mode.</p>
+  </section>
+
+  <section>
+    <h2>Owner Rule</h2>
+    <p class="note">If a new durable field is user preference, policy, command style, budget, target, or role, it belongs to config. If it is AI-facing status, recommendation, command, workflow, risk, or evidence, it belongs to report. Everything else should stay a transform-local object unless there is a concrete durable data reason.</p>
+  </section>
+</main>
+</body>
+</html>

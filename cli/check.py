@@ -1,6 +1,5 @@
 """check command: compute plan and run policy validation (no execution)."""
 
-import json
 import sys
 from pathlib import Path
 
@@ -12,7 +11,8 @@ from config.loader import load_all
 from planner.compute import compute_plan
 from policy.base import load_policies, PolicyEngine, PolicyContext
 from reporting.json_reporter import JSONReporter
-from reporting.human import print_validation_summary
+from reporting.human import print_report
+from reporting.report import build_report
 
 
 def cmd_check(args):
@@ -70,9 +70,9 @@ def cmd_check(args):
     # Output
     if getattr(args, 'json', False):
         reporter = JSONReporter()
-        print(reporter.format(plan, validation))
+        print(reporter.format(plan, validation, settings, full=getattr(args, "full", False)))
     else:
-        print_validation_summary(validation, plan)
+        print_report(build_report(plan, validation, settings))
     
     # Exit code
     if not validation.valid:

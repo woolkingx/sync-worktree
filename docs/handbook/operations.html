@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Operations - sync-worktree</title>
+  <link rel="stylesheet" href="handbook.css">
+</head>
+<body>
+<main>
+  <h1>Operations</h1>
+  <nav><a href="index.html">Index</a><a href="agent-interface.html">Agent Interface</a><a href="config.html">Config</a><a href="reporting.html">Reporting</a><a href="roadmap.html">Roadmap</a></nav>
+
+  <section>
+    <h2>Command Semantics</h2>
+    <table>
+      <thead><tr><th>command</th><th>current meaning</th><th>boundary</th></tr></thead>
+      <tbody>
+        <tr><td><code>inspect</code></td><td>Export bounded report for one target or all targets. Use <code>--full</code> for the full context contract.</td><td>Primary read-only decision support surface.</td></tr>
+        <tr><td><code>doctor</code></td><td>Check whether the current repository can safely use sync-worktree.</td><td>Read-only environment and configuration diagnosis.</td></tr>
+        <tr><td><code>explain &lt;target&gt;</code></td><td>Explain which config, facts, and policies produced the current report decision.</td><td>Read-only reasoning projection for agents.</td></tr>
+        <tr><td><code>check &lt;target&gt;</code></td><td>Build a report for the sync workflow without writing target files. Use <code>--json --full</code> for trace data.</td><td>Read-only report generation.</td></tr>
+        <tr><td><code>sync &lt;target&gt;</code></td><td>Same as check unless <code>--apply</code> is present. Use <code>--json --full</code> for trace data.</td><td>Read-only by default.</td></tr>
+        <tr><td><code>sync &lt;target&gt; --apply</code></td><td>Validate, create backup branch when configured, copy/modify/delete, run <code>git add -A</code>, persist sync state.</td><td>Direct write boundary for the sync decision path.</td></tr>
+        <tr><td><code>apply --from-decision</code></td><td>Execute an AI decision after the report and optional context hash make the action explicit.</td><td>Decision execution boundary.</td></tr>
+        <tr><td><code>target add/remove</code></td><td>Mutate target bindings in rule config.</td><td>Config write boundary.</td></tr>
+        <tr><td><code>config show/schema</code></td><td>Project effective config and reference config shape.</td><td>Read-only config projection.</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>Execution Gate</h2>
+    <pre><code>inspect/apply:
+  inspect current topology and target state
+  build bounded report
+  AI emits decision
+  apply verifies optional full-context hash when requested
+  dry-run returns report evidence
+  dispatches to safe operation or abort
+
+check/sync:
+  detect topology
+  load config
+  compute transform-local plan
+  validate config-driven checks
+  build report
+  if no --apply:
+    report only
+  if --json --full:
+    report plus trace
+  if --apply:
+    execute validated plan
+    persist sync-worktree.state.json</code></pre>
+  </section>
+
+  <section>
+    <h2>Agent Preflight</h2>
+    <pre><code>doctor:
+  detect topology
+  load config
+  inspect configured targets and bundle source
+  return compact report-style diagnosis
+
+explain:
+  build the same report as check
+  attach config/policy/fact edges
+  return why the status, reason, commands, and workflow were chosen</code></pre>
+    <p class="note"><code>doctor</code> and <code>explain</code> are for agents that need a quick orientation before editing or applying. They must stay read-only and bounded by default.</p>
+  </section>
+
+  <section>
+    <h2>Full Trace Flags</h2>
+    <pre><code>python3 sync_worktree.py check runner --json
+python3 sync_worktree.py check runner --json --full
+python3 sync_worktree.py sync runner --json --full
+python3 sync_worktree.py inspect --target runner
+python3 sync_worktree.py inspect --target runner --full</code></pre>
+    <p class="note">Default output is the bounded report. Full context and file-list trace modes are opt-in so AI agents do not need to parse thousands of lines before making a decision.</p>
+  </section>
+
+  <section>
+    <h2>Known Semantic Problem</h2>
+    <p class="warn"><code>sync</code> is currently ambiguous because it validates by default and writes only with <code>--apply</code>. The command is safe, but the name makes operation intent unclear. The report must always state whether the next workflow is review, clean target, rerun check, or apply.</p>
+  </section>
+</main>
+</body>
+</html>

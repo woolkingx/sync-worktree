@@ -1,9 +1,14 @@
-# Architecture
+# Architecture Reference
 
-`sync-worktree` is a topology-aware file sync tool with a narrow core:
+Current architecture truth lives in `docs/handbook/index.html`.
+
+This older reference describes the implemented narrow runtime core. It should be read as an implementation reference, not the top-level product framing.
+
+`sync-worktree` is AI decision support for Git worktree operations. Its narrow sync runtime:
 
 - detect the current Git topology
 - load rule and setting config
+- export AI decision context
 - resolve source and target worktrees
 - compute a sync plan
 - validate the plan with policies
@@ -16,12 +21,15 @@
 - Keep rule config immutable and setting config layered.
 - Keep policy evaluation separate from execution.
 - Keep the AI contract stable and machine-readable.
+- Treat sync as one policy-gated executable decision, not the whole product.
 
 ## System Flow
 
 ```text
 topology
   -> config
+  -> AI context
+  -> decision contract
   -> target resolution
   -> source scan
   -> filter

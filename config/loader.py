@@ -1,9 +1,7 @@
 """Configuration loader: loads Rule (immutable) + Settings (mutable)."""
 
 import json
-import os
 from dataclasses import asdict
-from pathlib import Path
 from typing import Tuple
 
 from .rule import RuleConfig, rule_config_path

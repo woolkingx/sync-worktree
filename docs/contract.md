@@ -2,17 +2,50 @@
 
 ## Overview
 
-The AI contract defines a **machine-readable interface** between sync-worktree and AI agents. It consists of three JSON structures:
+The AI contract defines a **machine-readable interface** between sync-worktree and AI agents. Default surfaces are bounded reports; full context remains explicit.
 
 | Contract | Direction | Command | Purpose |
 |----------|-----------|---------|---------|
-| **Context** | SW → AI | `inspect` | Full repository state snapshot |
+| **Report** | SW → AI | `inspect`, `check --json`, `doctor --json` | Bounded decision surface with status, recommendation, commands, workflow, evidence, and `report_hash` |
+| **Explanation** | SW → AI | `explain <target> --json` | Bounded config/policy/fact edges behind a report decision |
+| **Context** | SW → AI | `inspect --full` | Full repository state snapshot |
 | **Decision** | AI → SW | `apply --from-decision` | Action request from AI |
 | **Result** | SW → AI | `apply` output | Execution outcome |
 
 ---
 
-## 1. Context Contract (`inspect` output)
+## 1. Report Contract (default bounded output)
+
+Default `inspect`, `check --json`, `sync --json`, and `doctor --json` return a bounded report. The report is the preferred agent surface because it keeps context small while preserving status, recommendation, commands, workflow, evidence, and `report_hash`.
+
+```json
+{
+  "contract": {"version": "2.0", "type": "report"},
+  "meta": {
+    "generated_at": "2026-05-22T00:00:00Z",
+    "tool_version": "0.5.18-ai",
+    "report_hash": "sha256:..."
+  },
+  "report": {
+    "status": "ready|blocked|warning",
+    "reason": "ready_to_apply",
+    "summary": "runner can be synced",
+    "recommendation": "Run sync when ready.",
+    "commands": ["python3 sync_worktree.py sync runner --apply"],
+    "workflow": ["inspect", "decide", "apply"],
+    "evidence": {"target": "runner"},
+    "full_trace": null
+  }
+}
+```
+
+- `meta.report_hash`: SHA256 of the bounded report payload. AI can store this and later verify with `apply --verify-report`.
+- `report.commands`: Suggested commands only; AI should still execute through the decision/apply contract for writes.
+- `report.full_trace`: `null` by default. Use `check --json --full`, `sync --json --full`, or `inspect --full` for expanded trace/context.
+
+---
+
+## 2. Full Context Contract (`inspect --full` output)
 
 ### Schema
 
@@ -21,7 +54,7 @@ The AI contract defines a **machine-readable interface** between sync-worktree a
   "contract": {"version": "2.0", "type": "context"},
   "meta": {
     "generated_at": "2026-04-29T01:35:00Z",
-    "tool_version": "0.5.2-ai",
+    "tool_version": "0.5.18-ai",
     "context_hash": "sha256:..."  // deterministic hash of this entire JSON
   },
   "repository": {
@@ -111,8 +144,8 @@ The AI contract defines a **machine-readable interface** between sync-worktree a
           "remediation": {
             "description": "Stash, commit, or discard changes before syncing",
             "commands": [
-              "git -C /path/to/runner status  # review changes",
-              "git -C /path/to/runner stash     # temporary stash"
+              "git status --short",
+              "git stash"
             ]
           }
         }
@@ -160,7 +193,7 @@ The AI contract defines a **machine-readable interface** between sync-worktree a
 
 ---
 
-## 2. Decision Contract (AI → SW)
+## 3. Decision Contract (AI → SW)
 
 AI agent generates this JSON and passes to `apply --from-decision file.json`.
 
@@ -170,7 +203,8 @@ AI agent generates this JSON and passes to `apply --from-decision file.json`.
   "metadata": {
     "ai_agent": "my-agent",
     "timestamp": "2026-04-29T01:40:00Z",
-    "context_hash": "sha256:..."  // optional but recommended
+    "report_hash": "sha256:...",   // optional; verify with --verify-report
+    "context_hash": "sha256:..."   // optional; verify with --verify-context
   },
   "decision": {
     "action": "sync" | "fix_then_sync" | "ask" | "abort",
@@ -185,7 +219,8 @@ AI agent generates this JSON and passes to `apply --from-decision file.json`.
       "check_id": "POL-TOP-002",
       "description": "Target worktree is dirty",
       "commands": [
-        "git -C runner stash"
+        "git status --short",
+        "git stash"
       ]
     }
   ],
@@ -215,7 +250,7 @@ AI agent generates this JSON and passes to `apply --from-decision file.json`.
 
 ---
 
-## 3. Result Contract (SW → AI)
+## 4. Result Contract (SW → AI)
 
 Output of `apply --from-decision`:
 
@@ -227,7 +262,7 @@ Output of `apply --from-decision`:
     "executed_at": "2026-04-29T01:41:00Z"
   },
   "outcome": {
-    "status": "success" | "failed" | "partial" | "cancelled" | "dry_run" | "stale_context",
+    "status": "success" | "failed" | "partial" | "cancelled" | "dry_run" | "stale_report" | "stale_context" | "missing_report_hash",
     "phase": "sync" | "fix_1" | "fix_2" | ...,
     "target": "runner",
     "apply": true,
@@ -246,29 +281,31 @@ Output of `apply --from-decision`:
 - `failed`: A critical phase failed.
 - `cancelled`: Decision action was `abort`.
 - `dry_run`: `--dry-run` flag was used; no actions executed.
+- `stale_report`: Report hash mismatch (use `--verify-report` to enable this check).
 - `stale_context`: Context hash mismatch (use `--verify-context` to enable this check).
+- `missing_report_hash`: `--verify-report` was requested but the decision omitted `metadata.report_hash`.
 
 ---
 
-## 4. Usage Examples
+## 5. Usage Examples
 
 ### Simple sync (all clear)
 
 ```bash
-# 1. Get context
-python3 master/sync_worktree.py inspect --target release > context.json
+# 1. Get bounded report
+python3 master/sync_worktree.py inspect --target release > report.json
 
-# 2. AI decides (example: check health)
-# if ctx['targets'][0]['risk_assessment']['safe_to_apply']:
+# 2. AI decides (example: check report status)
+# if report['report']['status'] == 'ready':
 decision='{
   "contract":{"version":"2.0","type":"decision"},
-  "metadata":{"ai_agent":"demo","context_hash":"'"$(jq -r .meta.context_hash context.json)"'"},
+  "metadata":{"ai_agent":"demo","report_hash":"'"$(jq -r .meta.report_hash report.json)"'"},
   "decision":{"action":"sync","target":"release","apply":true,"force":false}
 }'
 
 # 3. Apply
 echo "$decision" > decision.json
-python3 master/sync_worktree.py apply --from-decision decision.json
+python3 master/sync_worktree.py apply --from-decision decision.json --verify-report
 ```
 
 ### Auto-fix then sync
@@ -283,7 +320,7 @@ python3 master/sync_worktree.py apply --from-decision decision.json
   "auto_fixes": [
     {
       "check_id": "POL-TOP-002",
-      "commands": ["git -C runner stash"]
+      "commands": ["git status --short", "git stash"]
     }
   ]
 }
@@ -299,21 +336,22 @@ python3 master/sync_worktree.py apply --from-decision decision.json
 
 ---
 
-## 5. Idempotency & Safety
+## 6. Idempotency & Safety
 
-- **`context_hash`**: Optional but recommended. If decision includes it and `apply --verify-context` is set, SW will reject execution if repo state changed since `inspect`.
+- **`report_hash`**: Optional but recommended for default bounded-report workflows. If decision includes it and `apply --verify-report` is set, SW will reject execution if the current report differs from the decision's report.
+- **`context_hash`**: Optional for full-context workflows. If decision includes it and `apply --verify-context` is set, SW will reject execution if repo state changed since `inspect --full`.
 - **`decision_hash`**: Included in result for traceability.
 - **Dry-run**: Always test decisions with `apply --dry-run` before real execution.
 
 ---
 
-## 6. Error Handling
+## 7. Error Handling
 
-All errors return a result contract with `"status": "failed"` or `"error"` field at top-level. The `stderr` contains human-readable diagnostics.
+After a valid decision contract is loaded, errors return a result contract with `outcome.status`. Early input errors, such as a missing decision file or invalid JSON, may return a result contract with a top-level `error` because no executable decision exists yet. JSON command modes should keep stdout machine-readable; human diagnostics belong in stderr only when the command is not returning a JSON result contract.
 
 ---
 
-## 7. Future Extensions
+## 8. Future Extensions
 
 - `confirm` command for interactive questions (for `ask` action)
 - `init_repo` and `create_worktree` actions

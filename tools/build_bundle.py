@@ -4,7 +4,6 @@ import json
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable
 
 
 RUNTIME_PATHS = (
@@ -33,6 +32,7 @@ def build_bundle(source_root: Path, output_root: Path, bundle_name: str = "sync-
     manifest = {
         "name": "sync-worktree",
         "bundle": bundle_name,
+        "version": _read_project_version(source_root / "pyproject.toml"),
         "built_at": datetime.now(timezone.utc).isoformat(),
         "entry_point": "sync_worktree.py",
         "runtime_paths": list(RUNTIME_PATHS),
@@ -56,6 +56,16 @@ def _copy_runtime_item(source: Path, dest: Path) -> None:
         return
 
     raise FileNotFoundError(f"Runtime item missing: {source}")
+
+
+def _read_project_version(pyproject_path: Path) -> str:
+    try:
+        for line in pyproject_path.read_text().splitlines():
+            if line.startswith("version = "):
+                return line.split("=", 1)[1].strip().strip('"')
+    except OSError:
+        pass
+    return "unknown"
 
 
 def main() -> int:

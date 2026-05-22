@@ -17,13 +17,14 @@ sys.path.insert(0, str(SOURCE_ROOT))
 from config.rule import RuleConfig, TargetBinding, rule_config_path
 from config.setting import Settings
 
-from core.topology import detect_topology, TopologyError
-from core.exceptions import ConfigError
+from core.topology import detect_topology
 from config.loader import load_all
 from cli.check import cmd_check as check_cmd
 from cli.sync import cmd_sync as sync_cmd
 from cli.inspect import cmd_inspect as inspect_cmd
 from cli.apply import cmd_apply as apply_cmd
+from cli.doctor import cmd_doctor as doctor_cmd
+from cli.explain import cmd_explain as explain_cmd
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -35,9 +36,10 @@ def build_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="command", required=True)
     
     # inspect
-    inspect_parser = sub.add_parser("inspect", help="Export complete repo state as JSON (for AI agents)")
+    inspect_parser = sub.add_parser("inspect", help="Export bounded report JSON for AI agents")
     inspect_parser.add_argument("--target", help="Limit to specific target (default: all)")
     inspect_parser.add_argument("--deep", action="store_true", help="Include file hashes (slow)")
+    inspect_parser.add_argument("--full", action="store_true", help="Export full context instead of bounded report")
     inspect_parser.add_argument("--output", type=Path, help="Write to file")
     inspect_parser.set_defaults(func=cmd_inspect_wrapper)
     
@@ -46,13 +48,27 @@ def build_parser() -> argparse.ArgumentParser:
     apply_parser.add_argument("--from-decision", type=Path, required=True, help="Decision JSON file")
     apply_parser.add_argument("--dry-run", action="store_true", help="Validate but don't execute")
     apply_parser.add_argument("--verify-context", action="store_true", help="Verify context hash before executing")
+    apply_parser.add_argument("--verify-report", action="store_true", help="Verify report hash before executing")
     apply_parser.set_defaults(func=cmd_apply_wrapper)
+
+    # doctor
+    doctor_parser = sub.add_parser("doctor", help="Run read-only agent preflight diagnosis")
+    doctor_parser.add_argument("--json", action="store_true", help="Machine-readable report output")
+    doctor_parser.set_defaults(func=cmd_doctor_wrapper)
+
+    # explain
+    explain_parser = sub.add_parser("explain", help="Explain the current report decision for a target")
+    explain_parser.add_argument("target", help="Target worktree name")
+    explain_parser.add_argument("--source", help="Source worktree name")
+    explain_parser.add_argument("--json", action="store_true", help="Machine-readable explanation output")
+    explain_parser.set_defaults(func=cmd_explain_wrapper)
     
     # check
     check_parser = sub.add_parser("check", help="Compute plan and validate policies (dry-run)")
     check_parser.add_argument("target", help="Target worktree name")
     check_parser.add_argument("--source", help="Source worktree name")
     check_parser.add_argument("--json", action="store_true", help="Machine-readable output")
+    check_parser.add_argument("--full", action="store_true", help="Include full trace in JSON output")
     check_parser.set_defaults(func=cmd_check_wrapper)
     
     # sync
@@ -61,6 +77,7 @@ def build_parser() -> argparse.ArgumentParser:
     sync_parser.add_argument("--source", help="Source worktree name")
     sync_parser.add_argument("--apply", action="store_true", help="Execute after successful validation")
     sync_parser.add_argument("--json", action="store_true", help="Machine-readable output")
+    sync_parser.add_argument("--full", action="store_true", help="Include full trace in JSON output")
     sync_parser.add_argument("--force", action="store_true", help="Bypass warnings")
     sync_parser.set_defaults(func=cmd_sync_wrapper)
     
@@ -183,6 +200,16 @@ def cmd_inspect_wrapper(args):
 def cmd_apply_wrapper(args):
     _attach_execution_roots(args)
     return apply_cmd(args)
+
+
+def cmd_doctor_wrapper(args):
+    _attach_execution_roots(args)
+    return doctor_cmd(args)
+
+
+def cmd_explain_wrapper(args):
+    _attach_execution_roots(args)
+    return explain_cmd(args)
 
 
 def cmd_check_wrapper(args):

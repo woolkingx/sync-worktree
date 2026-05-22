@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>sync-worktree Handbook</title>
+  <link rel="stylesheet" href="handbook.css">
+</head>
+<body>
+<main>
+  <h1>sync-worktree Handbook</h1>
+  <p><strong>sync-worktree</strong> is AI decision support for Git worktree operations. It is built to keep agents from making Git/worktree changes without a bounded report, clear recommendation, executable command suggestions, workflow guidance, and evidence. Syncing files is one executable decision; the core product is a compact <code>config -> report -> decision -> apply</code> loop.</p>
+
+  <nav>
+    <a href="system-model.html">System Model</a>
+    <a href="agent-interface.html">Agent Interface</a>
+    <a href="data-model.html">Data Model</a>
+    <a href="config.html">Config</a>
+    <a href="operations.html">Operations</a>
+    <a href="reporting.html">Reporting</a>
+    <a href="policies.html">Policies</a>
+    <a href="roadmap.html">Roadmap</a>
+  </nav>
+
+  <section>
+    <h2>Core Chain</h2>
+    <pre><code>config
+  -> git facts
+  -> transform submodules
+  -> report
+       status
+       summary
+       risks
+       recommendation
+       commands
+       workflow
+       evidence
+  -> decision
+  -> optional apply</code></pre>
+    <p>The two persistent owners are <code>config</code> and <code>report</code>. Git readers, topology detection, planner, policy checks, advisor logic, and executor are submodules that transform data into or out of those owners. They do not own durable product truth.</p>
+  </section>
+
+  <section>
+    <h2>Reading Order</h2>
+    <table>
+      <thead><tr><th>reader</th><th>first chapter</th><th>goal</th></tr></thead>
+      <tbody>
+        <tr><td>agent entering the repo</td><td><a href="system-model.html">System Model</a></td><td>Understand why decision context exists before touching Git.</td></tr>
+        <tr><td>agent-facing feature</td><td><a href="agent-interface.html">Agent Interface</a></td><td>Keep the product optimized for AI decisions, not human browsing.</td></tr>
+        <tr><td>CLI behavior change</td><td><a href="operations.html">Operations</a></td><td>Preserve dry-run/apply boundaries.</td></tr>
+        <tr><td>output/reporting change</td><td><a href="reporting.html">Reporting</a></td><td>Keep bounded report and full trace separate.</td></tr>
+        <tr><td>policy change</td><td><a href="policies.html">Policies</a></td><td>Project config-driven checks into report risks and commands.</td></tr>
+        <tr><td>data contract change</td><td><a href="data-model.html">Data Model</a></td><td>Know whether the field belongs to config, report, or transient transform state.</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>Current Status</h2>
+    <table>
+      <thead><tr><th>surface</th><th>status</th><th>note</th></tr></thead>
+      <tbody>
+        <tr><td>runtime</td><td>implemented</td><td>Python CLI with inspect, apply, check, sync, config, target, init commands.</td></tr>
+        <tr><td>architecture docs</td><td>being refreshed</td><td>This handbook is the current architecture source of truth; older markdown docs remain references.</td></tr>
+        <tr><td>operation clarity</td><td>implemented</td><td><code>sync</code> remains read-only unless <code>--apply</code> is passed; report output now makes the next workflow explicit.</td></tr>
+        <tr><td>output size</td><td>implemented</td><td>Default JSON output is bounded report data; full traces require explicit <code>--full</code>.</td></tr>
+      </tbody>
+    </table>
+  </section>
+</main>
+</body>
+</html>

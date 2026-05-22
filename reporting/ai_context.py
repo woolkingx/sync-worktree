@@ -17,6 +17,7 @@ from config.loader import load_all
 from planner.compute import compute_plan
 from policy.base import load_policies, PolicyEngine
 from core.git import git_status_porcelain
+from reporting.report import build_report, report_to_dict, wrap_report
 
 
 def _git_try(*args, cwd=None, timeout=30) -> Tuple[bool, str]:
@@ -190,7 +191,7 @@ def export_context(
         "contract": {"version": "2.0", "type": "context"},
         "meta": {
             "generated_at": datetime.now(timezone.utc).isoformat(),
-        "tool_version": "0.5.9-ai",
+            "tool_version": "0.5.18-ai",
             "context_hash": None
         },
         "repository": {
@@ -226,6 +227,107 @@ def export_context(
         "log_dir": str(runtime_root / "logs") if runtime_root else None,
     }
     return context
+
+
+def export_report(
+    target_name: Optional[str] = None,
+    cwd: Optional[Path] = None,
+    runtime_root: Optional[Path] = None,
+) -> Dict[str, Any]:
+    caller_root = Path(cwd).resolve() if cwd else Path.cwd().resolve()
+    runtime_root = Path(runtime_root).resolve() if runtime_root else None
+
+    try:
+        topology = detect_topology(caller_root)
+    except Exception as e:
+        return _report_error("Topology detection failed: {error}".format(error=e))
+
+    try:
+        rule_config, settings = load_all(topology, cli_overrides={})
+    except Exception as e:
+        return _report_error("Config load failed: {error}".format(error=e))
+
+    target_names = [target_name] if target_name else list(rule_config.targets.keys())
+    reports = {}
+    for name in target_names:
+        if name not in rule_config.targets:
+            reports[name] = _target_error_report(name, "Target is not configured")
+            continue
+        try:
+            plan = compute_plan(topology, rule_config, settings, name)
+            if plan is None:
+                reports[name] = _target_error_report(name, "Failed to compute plan")
+                continue
+            validation = _validate_plan(plan, rule_config, settings)
+            reports[name] = report_to_dict(build_report(plan, validation, settings))
+        except Exception as e:
+            reports[name] = _target_error_report(name, str(e))
+
+    if target_name:
+        return wrap_report(
+            reports.get(target_name),
+            extra_meta={"runtime_root": str(runtime_root) if runtime_root else None},
+        )
+
+    summary = _summarize_reports(reports)
+    aggregate = {
+        "status": "blocked" if summary["blocked"] else "ready",
+        "reason": "targets_blocked" if summary["blocked"] else "targets_ready",
+        "summary": "{ready}/{total} target(s) ready.".format(
+            ready=summary["ready"],
+            total=summary["total_targets"],
+        ),
+        "risks": [],
+        "recommendation": "Inspect the intended target before applying.",
+        "commands": [
+            "python3 sync_worktree.py inspect --target {target}".format(target=name)
+            for name in sorted(reports)
+        ],
+        "workflow": ["review target reports", "inspect intended target", "apply explicit decision"],
+        "evidence": {"targets": summary},
+        "full_trace": None,
+    }
+    payload = wrap_report(
+        aggregate,
+        extra_meta={"runtime_root": str(runtime_root) if runtime_root else None},
+    )
+    payload["reports"] = reports
+    payload["summary"] = summary
+    return payload
+
+
+def _report_error(message: str) -> Dict[str, Any]:
+    return {
+        "contract": {"version": "2.0", "type": "report"},
+        "error": message,
+        "meta": {"generated_at": datetime.now(timezone.utc).isoformat()},
+    }
+
+
+def _target_error_report(target_name: str, message: str) -> Dict[str, Any]:
+    return {
+        "status": "blocked",
+        "reason": "inspect_error",
+        "summary": "{target}: {message}".format(target=target_name, message=message),
+        "risks": [{
+            "id": "INSPECT-ERROR",
+            "severity": "error",
+            "message": message,
+            "evidence": [],
+        }],
+        "recommendation": "Resolve inspect error before syncing.",
+        "commands": [],
+        "workflow": ["review inspect error", "rerun sync-worktree inspect"],
+        "evidence": {"target": target_name},
+        "full_trace": None,
+    }
+
+
+def _summarize_reports(reports: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+    total = len(reports)
+    blocked = sum(1 for report in reports.values() if report.get("status") == "blocked")
+    ready = sum(1 for report in reports.values() if report.get("status") == "ready")
+    return {"total_targets": total, "ready": ready, "blocked": blocked}
 
 
 def _collect_worktree_info(topology) -> List[Dict]:

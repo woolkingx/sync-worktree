@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Agent Interface - sync-worktree</title>
+  <link rel="stylesheet" href="handbook.css">
+</head>
+<body>
+<main>
+  <h1>Agent Interface</h1>
+  <nav><a href="index.html">Index</a><a href="operations.html">Operations</a><a href="reporting.html">Reporting</a><a href="config.html">Config</a></nav>
+
+  <section>
+    <h2>Primary User</h2>
+    <p>The primary user is an AI agent. Human readability matters only because agents and humans share the same terminal, logs, and repository. The runtime must optimize for fast agent decisions: bounded data, explicit next commands, stable reason codes, stale-state detection, and clear write boundaries.</p>
+  </section>
+
+  <section>
+    <h2>Agent Contract</h2>
+    <table>
+      <thead><tr><th>need</th><th>surface</th><th>gate</th></tr></thead>
+      <tbody>
+        <tr><td>Can I act?</td><td><code>inspect --target</code>, <code>check --json</code></td><td>Report has <code>status</code>, <code>reason</code>, <code>recommendation</code>, <code>commands</code>, <code>workflow</code>, and <code>evidence</code>.</td></tr>
+        <tr><td>Is my view stale?</td><td>report hash, full context hash</td><td>Default report carries a hash usable by <code>apply --verify-report</code>; full context hash remains explicit.</td></tr>
+        <tr><td>Why is it blocked?</td><td><code>explain &lt;target&gt;</code></td><td>Explanation names the config, policy, and fact edges that produced the report decision.</td></tr>
+        <tr><td>Is the tool usable here?</td><td><code>doctor</code></td><td>Doctor reports topology, config, target, bundle, and runner/release readiness without writing.</td></tr>
+        <tr><td>What should I run next?</td><td><code>report.commands</code>, <code>report.workflow</code></td><td>Commands are config-filtered suggestions and never auto-executed by report generation.</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>Design Rule</h2>
+    <pre><code>agent question
+  -> bounded report or explanation
+  -> explicit suggested command
+  -> optional apply boundary
+  -> evidence</code></pre>
+    <p class="note">Do not add features that require the agent to read a large dump first and infer intent from it. Full context is a support surface, not the product surface.</p>
+  </section>
+</main>
+</body>
+</html>

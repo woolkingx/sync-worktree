@@ -8,15 +8,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict
 
-import policy  # Ensure policies are registered
+import policy  # noqa: F401  Ensure policies are registered
 
 from core.topology import detect_topology, TopologyError
-from core.exceptions import ConfigError
 from config.loader import load_all
 from planner.compute import compute_plan
 from policy.base import load_policies, PolicyEngine, PolicyContext
 from reporting.json_reporter import JSONReporter
-from reporting.human import print_validation_summary
+from reporting.human import print_report
+from reporting.report import build_report
 from executor.git import GitExecutor
 
 
@@ -59,15 +59,19 @@ def cmd_sync(args):
     policies = load_policies(rule_config, args.target)
     engine = PolicyEngine(policies)
     validation = engine.validate(ctx, strict=False)
-    
-    if getattr(args, 'json', False):
+
+    json_output = getattr(args, 'json', False)
+    report_payload = None
+    if json_output:
         reporter = JSONReporter()
-        print(reporter.format(plan, validation))
+        report_payload = json.loads(reporter.format(plan, validation, settings, full=getattr(args, "full", False)))
     else:
-        print_validation_summary(validation, plan)
+        print_report(build_report(plan, validation, settings))
     
     # Determine if we can proceed
     if not validation.valid:
+        if json_output:
+            print(json.dumps(report_payload, indent=2, ensure_ascii=False, default=str))
         if validation.has_errors:
             print("\n❌ Sync blocked due to policy errors.", file=sys.stderr)
             return 1
@@ -79,13 +83,25 @@ def cmd_sync(args):
             # else: --force ignores warnings
     
     if not args.apply:
-        print("\n💡 Plan validated. Re-run with --apply to execute.")
+        if json_output:
+            print(json.dumps(report_payload, indent=2, ensure_ascii=False, default=str))
+        else:
+            print("\n💡 Plan validated. Re-run with --apply to execute.")
         return 0
     
     executor = GitExecutor()
     try:
         result = executor.apply(plan, settings, backup_branch=settings.behavior.create_backup_branch)
+        outcome = {"status": "success", "phase": "sync", "target": args.target, "apply": True}
+        outcome.update(result)
         _write_sync_state(topology, args, plan, validation, result)
+        if json_output:
+            print(json.dumps({
+                "contract": {"version": "2.0", "type": "result"},
+                "report": report_payload,
+                "outcome": outcome,
+            }, indent=2, ensure_ascii=False, default=str))
+            return 0
         print(f"\n✅ Sync complete: +{result['files_copied']} ~{result['files_deleted']} deleted")
         if result.get('backup_branch'):
             print(f"   Backup branch: {result['backup_branch']}")
@@ -93,6 +109,19 @@ def cmd_sync(args):
             print(f"   Commit: {result['commit_sha'][:8]}")
         return 0
     except Exception as e:
+        if json_output:
+            print(json.dumps({
+                "contract": {"version": "2.0", "type": "result"},
+                "report": report_payload,
+                "outcome": {
+                    "status": "failed",
+                    "phase": "sync",
+                    "target": args.target,
+                    "apply": True,
+                    "error": str(e),
+                },
+            }, indent=2, ensure_ascii=False, default=str))
+            return 1
         print(f"\n❌ Sync failed: {e}", file=sys.stderr)
         return 1
 

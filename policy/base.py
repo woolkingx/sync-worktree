@@ -5,9 +5,6 @@ from dataclasses import dataclass, field
 from typing import List, Dict, Any, Optional, Type
 from pathlib import Path
 
-from core.exceptions import PolicyViolationError
-
-
 # =========== Data Structures ===========
 
 @dataclass(frozen=True)

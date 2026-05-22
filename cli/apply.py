@@ -7,9 +7,10 @@ import hashlib
 import shlex
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, List, Optional
 
 from reporting.ai_context import export_context as inspect_context
+from reporting.ai_context import export_report as inspect_report
 
 
 def cmd_apply(args):
@@ -41,6 +42,12 @@ def cmd_apply(args):
             "error": "Not a decision contract (missing contract.type='decision')"
         })
         return 1
+
+    if getattr(args, 'verify_report', False):
+        report_verification = _verify_report_hash(decision, caller_root, runtime_root)
+        if report_verification:
+            _print_result(report_verification)
+            return 1
     
     # Dry-run mode: validate against live context and return the inspected plan.
     if getattr(args, 'dry_run', False):
@@ -57,19 +64,23 @@ def cmd_apply(args):
             if decision_hash and current_hash != decision_hash:
                 _print_result({
                     "contract": {"version": "2.0", "type": "result"},
-                    "status": "stale_context",
-                    "message": "Context hash mismatch",
-                    "current_context_hash": current_hash,
-                    "decision_context_hash": decision_hash,
-                    "suggestion": "Re-run inspect to get fresh context"
+                    "outcome": {
+                        "status": "stale_context",
+                        "message": "Context hash mismatch",
+                        "current_context_hash": current_hash,
+                        "decision_context_hash": decision_hash,
+                        "suggestion": "Re-run inspect --full to get fresh context",
+                    },
                 })
                 return 1
         except Exception as e:
             _print_result({
                 "contract": {"version": "2.0", "type": "result"},
-                "status": "failed",
-                "message": "Context verification failed",
-                "error": str(e),
+                "outcome": {
+                    "status": "failed",
+                    "message": "Context verification failed",
+                    "error": str(e),
+                },
             })
             return 1
     
@@ -86,7 +97,7 @@ def cmd_apply(args):
             "decision_hash": _decision_hash(decision),
             "executed_at": datetime.now(timezone.utc).isoformat()
         },
-        "outcome": {"status": "unknown", "phase": None}
+        "outcome": {"status": "failed", "phase": None}
     }
     
     try:
@@ -130,7 +141,7 @@ def cmd_apply(args):
         import traceback; traceback.print_exc()
     
     _print_result(result)
-    return 0 if result["outcome"]["status"] in ("success", "cancelled") else 1
+    return 0 if result["outcome"]["status"] in ("success", "cancelled", "dry_run") else 1
 
 
 def _run_sync(target: str, apply: bool, force: bool, cwd: Path) -> Dict[str, Any]:
@@ -142,7 +153,12 @@ def _run_sync(target: str, apply: bool, force: bool, cwd: Path) -> Dict[str, Any
     if force:
         cmd.append("--force")
     r = subprocess.run(cmd, capture_output=True, text=True, cwd=cwd)
+    if r.returncode == 0:
+        status = "success" if apply else "dry_run"
+    else:
+        status = "failed"
     return {
+        "status": status,
         "phase": "sync",
         "target": target,
         "apply": apply,
@@ -219,12 +235,54 @@ def _decision_hash(decision: dict) -> str:
     return hashlib.sha256(s.encode()).hexdigest()[:32]
 
 
+def _verify_report_hash(decision: dict, caller_root: Path, runtime_root: Path) -> Optional[Dict[str, Any]]:
+    act = decision.get("decision", {})
+    target = act.get("target")
+    inspect_target = target if isinstance(target, str) and target not in ("", "all") else None
+    decision_report_hash = decision.get("metadata", {}).get("report_hash")
+    if not decision_report_hash:
+        return {
+            "contract": {"version": "2.0", "type": "result"},
+            "outcome": {
+                "status": "missing_report_hash",
+                "message": "Report hash is required when --verify-report is set",
+                "suggestion": "Re-run inspect and copy meta.report_hash into decision.metadata.report_hash",
+            },
+        }
+
+    report_snapshot = inspect_report(cwd=caller_root, runtime_root=runtime_root, target_name=inspect_target)
+    if "error" in report_snapshot:
+        return {
+            "contract": {"version": "2.0", "type": "result"},
+            "outcome": {
+                "status": "failed",
+                "message": "Report verification failed",
+                "error": report_snapshot["error"],
+            },
+        }
+
+    current_report_hash = report_snapshot.get("meta", {}).get("report_hash")
+    if current_report_hash != decision_report_hash:
+        return {
+            "contract": {"version": "2.0", "type": "result"},
+            "outcome": {
+                "status": "stale_report",
+                "message": "Report hash mismatch",
+                "current_report_hash": current_report_hash,
+                "decision_report_hash": decision_report_hash,
+                "suggestion": "Re-run inspect to get a fresh report",
+            },
+        }
+    return None
+
+
 def _build_dry_run_result(decision: dict, caller_root: Path, runtime_root: Path) -> Dict[str, Any]:
     act = decision.get("decision", {})
     action = act.get("action")
     target = act.get("target")
     inspect_target = target if isinstance(target, str) and target not in ("", "all") else None
     snapshot = inspect_context(cwd=caller_root, runtime_root=runtime_root, target_name=inspect_target)
+    report_snapshot = inspect_report(cwd=caller_root, runtime_root=runtime_root, target_name=inspect_target)
     if "error" in snapshot:
         return {
             "contract": {"version": "2.0", "type": "result"},
@@ -237,6 +295,20 @@ def _build_dry_run_result(decision: dict, caller_root: Path, runtime_root: Path)
                 "status": "failed",
                 "message": "Dry-run inspection failed",
                 "error": snapshot["error"],
+            },
+        }
+    if "error" in report_snapshot:
+        return {
+            "contract": {"version": "2.0", "type": "result"},
+            "metadata": {
+                "decision_hash": _decision_hash(decision),
+                "executed_at": datetime.now(timezone.utc).isoformat(),
+                "dry_run": True,
+            },
+            "outcome": {
+                "status": "failed",
+                "message": "Dry-run report failed",
+                "error": report_snapshot["error"],
             },
         }
 
@@ -274,6 +346,11 @@ def _build_dry_run_result(decision: dict, caller_root: Path, runtime_root: Path)
     else:
         outcome["targets"] = targets
 
+    if inspect_target:
+        outcome["report"] = report_snapshot.get("report")
+    else:
+        outcome["reports"] = report_snapshot.get("reports", {})
+
     return {
         "contract": {"version": "2.0", "type": "result"},
         "metadata": {
@@ -285,7 +362,7 @@ def _build_dry_run_result(decision: dict, caller_root: Path, runtime_root: Path)
     }
 
 
-def _is_safe_auto_fix_command(parts: list[str]) -> bool:
+def _is_safe_auto_fix_command(parts: List[str]) -> bool:
     if not parts or parts[0] != "git":
         return False
 

@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.18] - 2026-05-22
+
+### Added
+
+- Added bounded `doctor --json` and `explain <target> --json` surfaces for agent preflight and decision explanation.
+- Added `report_hash` metadata and `apply --verify-report` for stale report detection.
+
+### Changed
+
+- Default AI-facing `inspect`, `check --json`, and `sync --json` output now returns compact report contracts instead of full trace payloads.
+- Updated the project primary description to "AI decision support for Git worktree operations with bounded reports."
+
+### Fixed
+
+- `sync --json` now stays machine-readable without human suffix output.
+- `apply --verify-report` now fails closed when a decision omits `metadata.report_hash`.
+
+## [0.5.10] - 2026-04-29
+
+### Changed
+
+- Updated the project primary description around the full context contract for AI-assisted worktree sync.
+
 ## [0.5.9] - 2026-04-29
 
 ### Fixed

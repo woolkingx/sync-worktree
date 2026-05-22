@@ -2,24 +2,33 @@
 
 import json
 from datetime import datetime
-from pathlib import Path
 from typing import Any, Dict
 
 from planner.plan import SyncPlan
 from policy.base import ValidationSummary
+from reporting.report import build_report, wrap_report
 
 
 class JSONReporter:
     """Generate machine-readable JSON output."""
     
-    def format(self, plan: SyncPlan, validation: ValidationSummary) -> str:
-        output = {
+    def format(self, plan: SyncPlan, validation: ValidationSummary, settings, full: bool = False) -> str:
+        trace = {
             "operation": "check",
             "target": plan.target_name,
             "timestamp": datetime.utcnow().isoformat() + "Z",
             "plan": self._plan_to_dict(plan),
             "validation": validation.to_dict(),
             "can_proceed": validation.valid and not validation.has_errors,
+        }
+        full_trace = trace if full else None
+        report = build_report(plan, validation, settings, full_trace=full_trace)
+        if not full:
+            return json.dumps(wrap_report(report), indent=2, sort_keys=False)
+
+        output = {
+            "report": wrap_report(report),
+            "trace": trace,
         }
         return json.dumps(output, indent=2, sort_keys=False)
     

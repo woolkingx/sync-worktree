@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Report Owner - sync-worktree</title>
+  <link rel="stylesheet" href="handbook.css">
+</head>
+<body>
+<main>
+  <h1>Report Owner</h1>
+  <nav><a href="index.html">Index</a><a href="agent-interface.html">Agent Interface</a><a href="data-model.html">Data Model</a><a href="config.html">Config</a><a href="operations.html">Operations</a><a href="roadmap.html">Roadmap</a></nav>
+
+  <section>
+    <h2>Role</h2>
+    <p><code>report</code> is the AI-facing product data. Its job is to be short, precise, actionable, and bounded. It should tell the agent what happened, what is risky, what to do next, which commands are safe to run, and which workflow should follow.</p>
+  </section>
+
+  <section>
+    <h2>Report Fields</h2>
+    <table>
+      <thead><tr><th>field</th><th>meaning</th><th>source</th></tr></thead>
+      <tbody>
+        <tr><td><code>status</code></td><td>Current runtime emits <code>ready</code> or <code>blocked</code> for pre-execution reports.</td><td>checker/advisor transform</td></tr>
+        <tr><td><code>reason</code></td><td>Stable short reason code for the status.</td><td>checker/advisor transform</td></tr>
+        <tr><td><code>summary</code></td><td>One short state summary the AI can quote or act on.</td><td>advisor transform</td></tr>
+        <tr><td><code>risks</code></td><td>Bounded list of blocking or warning risks.</td><td>checker transform</td></tr>
+        <tr><td><code>recommendation</code></td><td>One preferred next move.</td><td>advisor transform using config.command_style</td></tr>
+        <tr><td><code>commands</code></td><td>Safe command suggestions, not auto-run.</td><td>advisor transform using config.command_style</td></tr>
+        <tr><td><code>workflow</code></td><td>Step-by-step next actions with rerun point.</td><td>advisor transform</td></tr>
+        <tr><td><code>evidence</code></td><td>Small proof set: source/target heads, dirty counts, action counts, policy ids.</td><td>git/planner/checker transforms</td></tr>
+        <tr><td><code>full_trace</code></td><td><code>null</code> by default; populated only when an explicit full trace mode is requested.</td><td>reporter transform</td></tr>
+        <tr><td><code>meta</code></td><td>Optional wrapper metadata such as report hash and generated timestamp.</td><td>report wrapper transform</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>Context Budget</h2>
+    <p class="note">Default report output is compact and omits full file lists such as <code>sync_files</code>. Full traces are explicit: <code>check --json --full</code> and <code>sync --json --full</code> include trace data, while <code>inspect --full</code> returns the older full context contract.</p>
+  </section>
+
+  <section>
+    <h2>Freshness</h2>
+    <p>Agents need a cheap stale-state check. Default report wrappers should carry a deterministic <code>report_hash</code> over the report payload. <code>apply</code> may verify that hash before acting, while full context hash remains available for full-context workflows.</p>
+  </section>
+
+  <section>
+    <h2>Target Shape</h2>
+    <pre><code>{
+  "status": "blocked",
+  "reason": "target_dirty",
+  "summary": "release has 2 dirty files; sync is unsafe.",
+  "risks": [
+    {
+      "id": "POL-TOP-002",
+      "severity": "error",
+      "message": "Target worktree has 2 uncommitted change(s)",
+      "evidence": ["M README.md", "?? tmp.txt"]
+    }
+  ],
+  "recommendation": "Review and clean release before syncing.",
+  "commands": [
+    "git -C /repo/release status --short",
+    "git -C /repo/release diff"
+  ],
+  "workflow": [
+    "review target dirtiness",
+    "commit, stash, or ask the user according to config.command_style",
+    "rerun sync-worktree check release"
+  ],
+  "evidence": {
+    "target": "release",
+    "source": "master@5742bc1",
+    "dest": "/repo/release",
+    "changes": {"A": 0, "M": 4, "D": 0, "P": 0},
+    "policy_errors": 1,
+    "policy_warnings": 0
+  },
+  "full_trace": null
+}</code></pre>
+    <p>This is the implemented report owner shape used by <code>check --json</code>, <code>sync --json</code>, <code>inspect --target</code>, and <code>apply --dry-run</code>.</p>
+  </section>
+</main>
+</body>
+</html>

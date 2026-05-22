@@ -1,8 +1,5 @@
 """POL-TOP-001: Role-based operation allowlist."""
 
-from pathlib import Path
-from typing import List
-
 from policy.base import Policy, PolicyContext, PolicyResult, policy
 
 

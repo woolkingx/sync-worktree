@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Config Owner - sync-worktree</title>
+  <link rel="stylesheet" href="handbook.css">
+</head>
+<body>
+<main>
+  <h1>Config Owner</h1>
+  <nav><a href="index.html">Index</a><a href="data-model.html">Data Model</a><a href="reporting.html">Reporting</a></nav>
+
+  <section>
+    <h2>Role</h2>
+    <p><code>config</code> owns the user's intended Git decision style. It is the only persistent owner for targets, roles, filters, policy enablement, report budgets, workflow preferences, and suggested command templates.</p>
+  </section>
+
+  <section>
+    <h2>Config Data</h2>
+    <table>
+      <thead><tr><th>field group</th><th>meaning</th><th>current or roadmap</th></tr></thead>
+      <tbody>
+        <tr><td>targets</td><td>Named worktree or bundle targets such as release and runner.</td><td>current</td></tr>
+        <tr><td>roles</td><td>Allowed operations, cleanliness requirements, filters, protect patterns, delete policy.</td><td>current</td></tr>
+        <tr><td>policies</td><td>Enabled/disabled policy code patterns and severity defaults.</td><td>current</td></tr>
+        <tr><td>report</td><td><code>max_lines</code>, <code>changed_preview_limit</code>, and <code>default_detail</code> for bounded report output.</td><td>current</td></tr>
+        <tr><td>command_style</td><td><code>dirty_target_strategy</code>, <code>commit_message_template</code>, and <code>preferred_remote</code>.</td><td>current</td></tr>
+        <tr><td>command allow/deny</td><td><code>allow_commands</code> and <code>deny_commands</code> constrain suggested commands in <code>report.commands</code>.</td><td>current</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>Command Style</h2>
+    <p>Suggested commands are config-owned preferences. The advisor transform reads <code>command_style</code> and generates <code>report.commands</code> and <code>report.workflow</code>; it does not execute those commands.</p>
+    <pre><code>{
+  "report": {
+    "max_lines": 80,
+    "changed_preview_limit": 12,
+    "default_detail": "compact"
+  },
+  "command_style": {
+    "dirty_target_strategy": "ask|stash|commit",
+    "commit_message_template": "prepare {target} sync",
+    "preferred_remote": "origin",
+    "allow_commands": ["git status", "git diff", "git add", "git commit", "git stash"],
+    "deny_commands": ["git reset --hard", "git clean", "git push --force"]
+  }
+}</code></pre>
+  </section>
+
+  <section>
+    <h2>Boundary</h2>
+    <p class="note">Config does not read Git and does not execute commands. It only defines legal preferences and constraints. Git facts are transform inputs; execution evidence belongs in report.</p>
+  </section>
+</main>
+</body>
+</html>

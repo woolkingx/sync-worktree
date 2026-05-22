@@ -1,10 +1,9 @@
 """Setting configuration - personal/environment preferences (mutable, multi-layer)."""
 
 import json
-import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Optional
 
 from core.exceptions import ConfigError
 
@@ -37,6 +36,32 @@ class OutputSettings:
 
 
 @dataclass(frozen=True)
+class ReportSettings:
+    max_lines: int = 80
+    changed_preview_limit: int = 12
+    default_detail: str = "compact"  # "compact" | "details" | "full"
+
+
+@dataclass(frozen=True)
+class CommandStyleSettings:
+    dirty_target_strategy: str = "ask"  # "ask" | "stash" | "commit"
+    commit_message_template: str = "prepare {target} sync"
+    preferred_remote: str = "origin"
+    allow_commands: list = field(default_factory=lambda: [
+        "git status",
+        "git diff",
+        "git add",
+        "git commit",
+        "git stash",
+    ])
+    deny_commands: list = field(default_factory=lambda: [
+        "git reset --hard",
+        "git clean",
+        "git push --force",
+    ])
+
+
+@dataclass(frozen=True)
 class HooksSettings:
     pre_sync: Optional[str] = None   # shell command string
     post_sync: Optional[str] = None  # shell command string
@@ -65,6 +90,8 @@ class Settings:
     logging: LoggingSettings = field(default_factory=LoggingSettings)
     behavior: BehaviorSettings = field(default_factory=BehaviorSettings)
     output: OutputSettings = field(default_factory=OutputSettings)
+    report: ReportSettings = field(default_factory=ReportSettings)
+    command_style: CommandStyleSettings = field(default_factory=CommandStyleSettings)
     hooks: HooksSettings = field(default_factory=HooksSettings)
     experimental: ExperimentalSettings = field(default_factory=ExperimentalSettings)
     
@@ -84,6 +111,14 @@ class Settings:
                 "cleanup_logs_after_days": 30,
             },
             "output": {"json": False, "verbose": False, "quiet": False, "show_diff": False, "color": "auto"},
+            "report": {"max_lines": 80, "changed_preview_limit": 12, "default_detail": "compact"},
+            "command_style": {
+                "dirty_target_strategy": "ask",
+                "commit_message_template": "prepare {target} sync",
+                "preferred_remote": "origin",
+                "allow_commands": ["git status", "git diff", "git add", "git commit", "git stash"],
+                "deny_commands": ["git reset --hard", "git clean", "git push --force"],
+            },
             "hooks": {"pre_sync": None, "post_sync": None},
             "experimental": {"parallel_sync": False, "max_workers": 3, "use_git_archive": False},
         }
@@ -152,6 +187,8 @@ def load_settings(topology_context, cli_overrides: Optional[dict] = None) -> Set
             logging=LoggingSettings(**merged.get("logging", {})),
             behavior=BehaviorSettings(**merged.get("behavior", {})),
             output=OutputSettings(**merged.get("output", {})),
+            report=ReportSettings(**merged.get("report", {})),
+            command_style=CommandStyleSettings(**merged.get("command_style", {})),
             hooks=HooksSettings(**merged.get("hooks", {})),
             experimental=ExperimentalSettings(**merged.get("experimental", {})),
         )

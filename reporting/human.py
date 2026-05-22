@@ -1,50 +1,44 @@
 """Human-readable terminal output."""
 
-from pathlib import Path
-from typing import List
-
-from policy.base import PolicyResult, ValidationSummary
+from config.setting import Settings
+from policy.base import ValidationSummary
 from planner.plan import SyncPlan
+from reporting.report import build_report
 
 
-def print_validation_summary(validation: ValidationSummary, plan: SyncPlan):
-    """Pretty-print validation results for terminal."""
-    print(f"\nTarget: {plan.target_name}")
-    if plan.source_commit:
-        print(f"Source: {plan.source} @ {plan.source_commit[:8]}")
-    else:
-        print(f"Source: {plan.source}")
-    print(f"Dest:   {plan.dest}")
-    print(f"Files to sync: {len(plan.sync_files)}")
-    
-    # Show passed policies if verbose? Keep concise.
-    
-    if validation.failed:
-        print("\n❌ Policy violations:")
-        for r in validation.failed:
-            print(f"\n  [{r.code}] {r.severity.upper()}: {r.title}")
-            print(f"    {r.message}")
-            if r.evidence:
-                print("    Evidence:")
-                for ev in r.evidence:
-                    print(f"      • {ev}")
-            if r.suggestion:
-                print(f"    💡 {r.suggestion}")
-            if r.fix_commands:
-                print("    Commands to fix:")
-                for cmd in r.fix_commands:
-                    print(f"      $ {cmd}")
-    else:
-        print("\n✅ All policy checks passed")
-    
-    # Action summary
-    actions = plan.actions
-    parts = []
-    for code in ['A', 'M', 'D']:
-        cnt = len(actions.get(code, []))
-        if cnt:
-            parts.append(f"{code}:{cnt}")
-    if parts:
-        print(f"\nChanges: {' | '.join(parts)}")
-    else:
-        print("\nNo changes needed.")
+def print_report(report):
+    """Print bounded report output for terminal users and AI agents."""
+    print("")
+    print("Status: {status}".format(status=report.status))
+    print("Reason: {reason}".format(reason=report.reason))
+    print("Summary: {summary}".format(summary=report.summary))
+    print("Recommendation: {recommendation}".format(recommendation=report.recommendation))
+
+    if report.risks:
+        print("")
+        print("Risks:")
+        for risk in report.risks:
+            print("  [{id}] {severity}: {message}".format(
+                id=risk.id,
+                severity=risk.severity,
+                message=risk.message,
+            ))
+            for item in risk.evidence:
+                print("    - {item}".format(item=item))
+
+    if report.commands:
+        print("")
+        print("Commands:")
+        for command in report.commands:
+            print("  $ {command}".format(command=command))
+
+    if report.workflow:
+        print("")
+        print("Workflow:")
+        for index, step in enumerate(report.workflow, start=1):
+            print("  {index}. {step}".format(index=index, step=step))
+
+
+def print_validation_summary(validation: ValidationSummary, plan: SyncPlan, settings=None):
+    """Compatibility wrapper for older call sites."""
+    print_report(build_report(plan, validation, settings or Settings()))

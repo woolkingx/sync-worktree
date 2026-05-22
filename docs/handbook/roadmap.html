@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Roadmap - sync-worktree</title>
+  <link rel="stylesheet" href="handbook.css">
+</head>
+<body>
+<main>
+  <h1>Roadmap</h1>
+  <nav><a href="index.html">Index</a><a href="operations.html">Operations</a><a href="reporting.html">Reporting</a></nav>
+
+  <section>
+    <h2>Completed Correction Cycle</h2>
+    <table>
+      <thead><tr><th>phase</th><th>change</th><th>acceptance gate</th></tr></thead>
+      <tbody>
+        <tr><td>0.5.12 owner collapse</td><td>Collapse persistent data ownership to config and report; demote git/planner/policy/advisor/executor to submodules.</td><td>Handbook no longer treats topology/planner/policy as durable owners.</td></tr>
+        <tr><td>0.5.13 config command style</td><td>Add report budget and suggested command style to config.</td><td>Report commands can follow user/team preference without hardcoding one workflow.</td></tr>
+        <tr><td>0.5.14 report owner runtime</td><td>Make default outputs bounded reports with status, reason, recommendation, commands, workflow, and evidence.</td><td>Default output for a 200-file project stays under the configured budget and points to full trace mode.</td></tr>
+        <tr><td>0.5.15 CLI semantics cleanup</td><td>Clarify <code>check</code>, <code>sync --apply</code>, and <code>inspect</code> help text around report generation and write boundaries.</td><td>Help output makes report-only versus write mode unambiguous.</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>Completed Agent-Facing Cycle</h2>
+    <table>
+      <thead><tr><th>phase</th><th>change</th><th>acceptance gate</th></tr></thead>
+      <tbody>
+        <tr><td>0.5.16 report hash</td><td>Add deterministic report hash metadata and optional apply-time report verification.</td><td>An agent can detect stale default report data without requesting full context.</td></tr>
+        <tr><td>0.5.17 doctor</td><td>Add read-only environment/config/target diagnosis.</td><td><code>doctor --json</code> returns bounded status, risks, commands, and workflow.</td></tr>
+        <tr><td>0.5.18 explain</td><td>Add read-only explanation of why a report is ready or blocked.</td><td><code>explain &lt;target&gt; --json</code> names config, policy, and fact edges for the current decision.</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>Non-Goals</h2>
+    <ul>
+      <li>Do not replace Git worktree semantics with generic rsync behavior.</li>
+      <li>Do not dump full repository context by default.</li>
+      <li>Do not create new durable data owners when a value is only transform state.</li>
+      <li>Do not make target worktrees editable sources of truth.</li>
+      <li>Do not add daemon behavior before CLI and contract boundaries are clear.</li>
+    </ul>
+  </section>
+</main>
+</body>
+</html>

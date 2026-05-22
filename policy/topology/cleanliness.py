@@ -1,8 +1,5 @@
 """POL-TOP-002: Target worktree must be clean (no uncommitted changes)."""
 
-from pathlib import Path
-from typing import List
-
 from policy.base import Policy, PolicyContext, PolicyResult, policy
 from core.git import git_status_porcelain
 
@@ -47,9 +44,7 @@ class TargetCleanlinessPolicy(Policy):
             evidence=evidence,
             suggestion="Stash, commit, or discard changes before syncing",
             fix_commands=[
-                f"git -C {dest} status  # review changes",
-                f"git -C {dest} stash     # temporary stash",
-                f"# or: git -C {dest} add . && git commit -m 'WIP'",
-                f"# or: git -C {dest} reset --hard  # DESTROY UNSAVED WORK"
+                "git status --short",
+                "git stash",
             ]
         )

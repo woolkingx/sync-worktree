@@ -1,13 +1,11 @@
 """Git-based sync executor (simple, stable)."""
 
-import filecmp
-import os
 import shutil
 import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, Dict, List
+from typing import Dict
 
 from core.git import git_run
 from core.exceptions import SyncAbortedError
