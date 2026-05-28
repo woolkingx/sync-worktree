@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.19] - 2026-05-28
+
+### Fixed
+
+- `sync --target <name>` is now accepted as a deprecated compatibility alias for older agent templates while `sync <name>` remains canonical.
+- Conflicting sync targets, such as `sync runner --target release`, now fail before execution.
+
+### Changed
+
+- Documented the sync target command boundary in README and handbook operations docs.
+
 ## [0.5.18] - 2026-05-22
 
 ### Added

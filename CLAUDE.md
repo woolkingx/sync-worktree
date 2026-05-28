@@ -35,6 +35,7 @@ Architecture truth: `docs/handbook/index.html`
 
 ## Decisions
 
+- 0.5.19 (2026-05-28): `sync <target>` remains the canonical CLI shape; `sync --target <target>` is a deprecated compatibility alias for stale agent templates and conflicting target inputs fail before execution.
 - 0.5.18 (2026-05-22): primary user is the AI agent; added report hash verification plus bounded `doctor` and `explain` preflight surfaces.
 - 0.5.13 (2026-05-22): implemented bounded report runtime defaults; `inspect`, `check --json`, and `sync --json` return compact reports unless explicit `--full` is requested, and `apply --dry-run` includes report evidence.
 - 0.5.12 (2026-05-22): data ownership collapsed to `config` and `report`; all other modules are transforms or adapters.

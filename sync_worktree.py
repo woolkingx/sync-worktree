@@ -73,7 +73,12 @@ def build_parser() -> argparse.ArgumentParser:
     
     # sync
     sync_parser = sub.add_parser("sync", help="Check then optionally execute")
-    sync_parser.add_argument("target", help="Target worktree name")
+    sync_parser.add_argument("target", nargs="?", help="Target worktree name")
+    sync_parser.add_argument(
+        "--target",
+        dest="target_flag",
+        help="Legacy alias for target; prefer positional 'sync <target>'",
+    )
     sync_parser.add_argument("--source", help="Source worktree name")
     sync_parser.add_argument("--apply", action="store_true", help="Execute after successful validation")
     sync_parser.add_argument("--json", action="store_true", help="Machine-readable output")
@@ -218,8 +223,29 @@ def cmd_check_wrapper(args):
 
 
 def cmd_sync_wrapper(args):
+    target_status = _normalize_sync_target(args)
+    if target_status is not None:
+        return target_status
     _attach_execution_roots(args)
     return sync_cmd(args)
+
+
+def _normalize_sync_target(args):
+    positional = getattr(args, "target", None)
+    legacy_flag = getattr(args, "target_flag", None)
+    if positional and legacy_flag and positional != legacy_flag:
+        print(
+            f"Error: conflicting targets: positional '{positional}' and --target '{legacy_flag}'",
+            file=sys.stderr,
+        )
+        return 2
+    if legacy_flag and not positional:
+        print("Warning: 'sync --target <name>' is deprecated; use 'sync <name>'.", file=sys.stderr)
+        args.target = legacy_flag
+    if not getattr(args, "target", None):
+        print("Error: sync requires a target; use 'sync <target>'.", file=sys.stderr)
+        return 2
+    return None
 
 
 def cmd_config_show(args):

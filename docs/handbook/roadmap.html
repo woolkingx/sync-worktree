@@ -31,6 +31,7 @@
         <tr><td>0.5.16 report hash</td><td>Add deterministic report hash metadata and optional apply-time report verification.</td><td>An agent can detect stale default report data without requesting full context.</td></tr>
         <tr><td>0.5.17 doctor</td><td>Add read-only environment/config/target diagnosis.</td><td><code>doctor --json</code> returns bounded status, risks, commands, and workflow.</td></tr>
         <tr><td>0.5.18 explain</td><td>Add read-only explanation of why a report is ready or blocked.</td><td><code>explain &lt;target&gt; --json</code> names config, policy, and fact edges for the current decision.</td></tr>
+        <tr><td>0.5.19 sync target alias</td><td>Keep <code>sync &lt;target&gt;</code> canonical while accepting deprecated <code>sync --target &lt;target&gt;</code> for stale agent templates.</td><td>Legacy alias emits a warning, conflicting target inputs fail closed, and canonical skill examples use positional target syntax.</td></tr>
       </tbody>
     </table>
   </section>

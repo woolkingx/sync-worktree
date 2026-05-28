@@ -20,6 +20,7 @@
         <tr><td><code>explain &lt;target&gt;</code></td><td>Explain which config, facts, and policies produced the current report decision.</td><td>Read-only reasoning projection for agents.</td></tr>
         <tr><td><code>check &lt;target&gt;</code></td><td>Build a report for the sync workflow without writing target files. Use <code>--json --full</code> for trace data.</td><td>Read-only report generation.</td></tr>
         <tr><td><code>sync &lt;target&gt;</code></td><td>Same as check unless <code>--apply</code> is present. Use <code>--json --full</code> for trace data.</td><td>Read-only by default.</td></tr>
+        <tr><td><code>sync --target &lt;target&gt;</code></td><td>Legacy compatibility alias for older agent command templates. Emits a deprecation warning and normalizes to <code>sync &lt;target&gt;</code>.</td><td>Ingress compatibility only; not the canonical operation shape.</td></tr>
         <tr><td><code>sync &lt;target&gt; --apply</code></td><td>Validate, create backup branch when configured, copy/modify/delete, run <code>git add -A</code>, persist sync state.</td><td>Direct write boundary for the sync decision path.</td></tr>
         <tr><td><code>apply --from-decision</code></td><td>Execute an AI decision after the report and optional context hash make the action explicit.</td><td>Decision execution boundary.</td></tr>
         <tr><td><code>target add/remove</code></td><td>Mutate target bindings in rule config.</td><td>Config write boundary.</td></tr>
@@ -76,6 +77,7 @@ python3 sync_worktree.py sync runner --json --full
 python3 sync_worktree.py inspect --target runner
 python3 sync_worktree.py inspect --target runner --full</code></pre>
     <p class="note">Default output is the bounded report. Full context and file-list trace modes are opt-in so AI agents do not need to parse thousands of lines before making a decision.</p>
+    <p class="note"><code>--target</code> remains canonical for <code>inspect</code>. For <code>sync</code>, the target is positional; the legacy flag exists only to keep stale agent templates from hard-failing before they can be corrected.</p>
   </section>
 
   <section>

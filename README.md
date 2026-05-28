@@ -2,7 +2,7 @@
 
 AI decision support for Git worktree operations with bounded decision reports.
 
-Current version: `0.5.18`
+Current version: `0.5.19`
 
 Use `master/sync_worktree.py` as the supported entry point.
 
@@ -67,6 +67,9 @@ print(result["outcome"]["status"])  # "success" / "failed" / "dry_run"
 | `target remove <name>` | Remove a target binding | Target JSON |
 
 **See full spec**: [docs/contract.md](docs/contract.md)
+
+`sync <target>` is the canonical sync command shape. `sync --target <target>` is accepted only as a legacy compatibility alias for older agent templates and emits a deprecation warning on stderr.
+
 ### Full Workflow Example
 
 ```bash

@@ -1,6 +1,6 @@
 [project]
 name = "sync-worktree"
-version = "0.5.18"
+version = "0.5.19"
 description = "AI decision support for git worktree operations with bounded reports"
 requires-python = ">=3.8"
 license = "MIT"
